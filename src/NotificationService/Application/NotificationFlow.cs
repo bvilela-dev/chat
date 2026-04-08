@@ -70,10 +70,6 @@ public sealed class TrackConversationParticipantCommandHandler(IConversationMemb
         {
             await membershipStore.AddParticipantAsync(request.ConversationId, request.UserId, cancellationToken);
         }
-        else
-        {
-            await membershipStore.RemoveParticipantAsync(request.ConversationId, request.UserId, cancellationToken);
-        }
 
         await membershipStore.MarkProcessedAsync(request.EventId, request.ConsumerName, cancellationToken);
         telemetry.RecordEvent(request.Joined ? nameof(ConversationJoinedEvent) : nameof(ConversationLeftEvent));

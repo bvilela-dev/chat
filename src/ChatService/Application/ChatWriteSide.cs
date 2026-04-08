@@ -4,20 +4,13 @@ using MediatR;
 
 namespace ChatService.Application;
 
-public sealed record ValidatedUser(Guid Id, string Name, string Email);
-
 public sealed record ChatRealtimeMessage(Guid MessageId, Guid ConversationId, Guid SenderId, string SenderName, string Content, DateTime CreatedAtUtc);
 
-public sealed record SendMessageCommand(Guid ConversationId, Guid UserId, string Content) : IRequest<ChatRealtimeMessage>;
+public sealed record SendMessageCommand(Guid ConversationId, Guid UserId, string SenderName, string Content) : IRequest<ChatRealtimeMessage>;
 
 public sealed record JoinConversationCommand(Guid ConversationId, Guid UserId, string ConnectionId) : IRequest;
 
 public sealed record LeaveConversationCommand(Guid ConversationId, Guid UserId, string ConnectionId) : IRequest;
-
-public interface IIdentityValidationClient
-{
-    Task<ValidatedUser?> ValidateAsync(Guid userId, CancellationToken cancellationToken);
-}
 
 public interface IConversationNotifier
 {
@@ -61,6 +54,7 @@ public sealed class SendMessageCommandValidator : AbstractValidator<SendMessageC
     {
         RuleFor(command => command.ConversationId).NotEmpty();
         RuleFor(command => command.UserId).NotEmpty();
+        RuleFor(command => command.SenderName).NotEmpty().MaximumLength(200);
         RuleFor(command => command.Content).NotEmpty().MaximumLength(4000);
     }
 }
@@ -85,20 +79,19 @@ public sealed class LeaveConversationCommandValidator : AbstractValidator<LeaveC
     }
 }
 
-public sealed class SendMessageCommandHandler(IIdentityValidationClient validationClient, IChatEventPublisher publisher, IConversationNotifier notifier, IClock clock, IChatTelemetry telemetry)
+public sealed class SendMessageCommandHandler(IChatEventPublisher publisher, IConversationNotifier notifier, IClock clock, IChatTelemetry telemetry)
     : IRequestHandler<SendMessageCommand, ChatRealtimeMessage>
 {
     public async Task<ChatRealtimeMessage> Handle(SendMessageCommand request, CancellationToken cancellationToken)
     {
-        var user = await validationClient.ValidateAsync(request.UserId, cancellationToken)
-            ?? throw new InvalidOperationException("User validation failed.");
-
         var createdAtUtc = clock.UtcNow;
         var messageId = Guid.NewGuid();
-        var message = new ChatRealtimeMessage(messageId, request.ConversationId, user.Id, user.Name, request.Content.Trim(), createdAtUtc);
+        var content = request.Content.Trim();
+        var senderName = request.SenderName.Trim();
+        var message = new ChatRealtimeMessage(messageId, request.ConversationId, request.UserId, senderName, content, createdAtUtc);
 
         await publisher.PublishAsync(
-            new MessageSentEvent(Guid.NewGuid(), createdAtUtc, messageId, request.ConversationId, user.Id, user.Name, request.Content.Trim()),
+            new MessageSentEvent(Guid.NewGuid(), createdAtUtc, messageId, request.ConversationId, request.UserId, senderName, content),
             cancellationToken);
 
         await notifier.BroadcastMessageAsync(request.ConversationId, message, cancellationToken);
@@ -108,16 +101,13 @@ public sealed class SendMessageCommandHandler(IIdentityValidationClient validati
     }
 }
 
-public sealed class JoinConversationCommandHandler(IIdentityValidationClient validationClient, IConversationNotifier notifier, IChatEventPublisher publisher, IClock clock, IChatTelemetry telemetry)
+public sealed class JoinConversationCommandHandler(IConversationNotifier notifier, IChatEventPublisher publisher, IClock clock, IChatTelemetry telemetry)
     : IRequestHandler<JoinConversationCommand>
 {
     public async Task Handle(JoinConversationCommand request, CancellationToken cancellationToken)
     {
-        var user = await validationClient.ValidateAsync(request.UserId, cancellationToken)
-            ?? throw new InvalidOperationException("User validation failed.");
-
         await notifier.AddConnectionToConversationAsync(request.ConnectionId, request.ConversationId, cancellationToken);
-        await publisher.PublishAsync(new ConversationJoinedEvent(Guid.NewGuid(), clock.UtcNow, request.ConversationId, user.Id), cancellationToken);
+        await publisher.PublishAsync(new ConversationJoinedEvent(Guid.NewGuid(), clock.UtcNow, request.ConversationId, request.UserId), cancellationToken);
         telemetry.IncrementCommand(nameof(JoinConversationCommand));
     }
 }

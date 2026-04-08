@@ -49,6 +49,20 @@ public sealed class RedisPresenceStore(IConnectionMultiplexer connectionMultiple
         return new UserPresence(userId, isOnline, await GetLastSeenAsync(database, userId));
     }
 
+    public Task<IReadOnlyCollection<UserPresence>> GetOnlineAsync(CancellationToken cancellationToken)
+    {
+        var endpoint = connectionMultiplexer.GetEndPoints().First();
+        var server = connectionMultiplexer.GetServer(endpoint);
+        var users = server.Keys(pattern: "user:*:online")
+            .Select(key => key.ToString())
+            .Select(value => value.Split(':', StringSplitOptions.RemoveEmptyEntries))
+            .Where(parts => parts.Length == 3 && Guid.TryParse(parts[1], out _))
+            .Select(parts => new UserPresence(Guid.Parse(parts[1]), true, null))
+            .ToArray();
+
+        return Task.FromResult<IReadOnlyCollection<UserPresence>>(users);
+    }
+
     private static async Task<DateTime?> GetLastSeenAsync(IDatabase database, Guid userId)
     {
         var value = await database.StringGetAsync($"user:{userId}:last_seen");

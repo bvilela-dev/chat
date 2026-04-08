@@ -8,11 +8,15 @@ namespace MessageService.Application;
 
 public sealed record MessageReadDto(Guid Id, Guid ConversationId, Guid SenderId, string SenderName, string Content, DateTime CreatedAtUtc);
 
-public sealed record ConversationReadDto(Guid Id, string LastMessage, DateTime? LastMessageAtUtc);
+public sealed record ConversationReadDto(Guid Id, string LastMessage, DateTime? LastMessageAtUtc, bool IsGroup, Guid? CounterpartUserId);
+
+public sealed record ConversationSummary(Guid Id, string LastMessage, DateTime? LastMessageAtUtc, bool IsGroup, Guid? CounterpartUserId);
 
 public sealed record MessageProjectionRequested(Guid EventId, DateTime OccurredAtUtc, Guid MessageId, Guid ConversationId, Guid SenderId, string SenderName, string Content, DateTime MessageCreatedAtUtc) : IIntegrationEvent;
 
 public sealed record PersistMessageCommand(MessageSentEvent IntegrationEvent) : IRequest;
+
+public sealed record CreateDirectConversationCommand(Guid InitiatorId, Guid ParticipantId) : IRequest<ConversationReadDto>;
 
 public sealed record ProjectMessageReadModelCommand(MessageProjectionRequested Projection) : IRequest;
 
@@ -32,7 +36,11 @@ public interface IMessageRepository
 
     Task<Conversation?> GetConversationAsync(Guid conversationId, CancellationToken cancellationToken);
 
+    Task<ConversationSummary?> GetDirectConversationAsync(Guid firstUserId, Guid secondUserId, CancellationToken cancellationToken);
+
     Task AddConversationAsync(Conversation conversation, CancellationToken cancellationToken);
+
+    Task CreateDirectConversationAsync(Guid conversationId, Guid initiatorId, Guid participantId, DateTime createdAtUtc, CancellationToken cancellationToken);
 
     Task<bool> HasParticipantAsync(Guid conversationId, Guid userId, CancellationToken cancellationToken);
 
@@ -48,7 +56,7 @@ public interface IMessageRepository
 
     Task<IReadOnlyCollection<MessageReadModel>> GetMessagesByConversationAsync(Guid conversationId, int page, int pageSize, CancellationToken cancellationToken);
 
-    Task<IReadOnlyCollection<ConversationReadModel>> GetUserConversationsAsync(Guid userId, CancellationToken cancellationToken);
+    Task<IReadOnlyCollection<ConversationSummary>> GetUserConversationsAsync(Guid userId, CancellationToken cancellationToken);
 
     Task SaveChangesAsync(CancellationToken cancellationToken);
 }
@@ -70,7 +78,6 @@ public sealed class MessageMappingProfile : Profile
     public MessageMappingProfile()
     {
         CreateMap<MessageReadModel, MessageReadDto>();
-        CreateMap<ConversationReadModel, ConversationReadDto>();
     }
 }
 
@@ -89,6 +96,44 @@ public sealed class GetUserConversationsQueryValidator : AbstractValidator<GetUs
     public GetUserConversationsQueryValidator()
     {
         RuleFor(query => query.UserId).NotEmpty();
+    }
+}
+
+public sealed class CreateDirectConversationCommandValidator : AbstractValidator<CreateDirectConversationCommand>
+{
+    public CreateDirectConversationCommandValidator()
+    {
+        RuleFor(command => command.InitiatorId).NotEmpty();
+        RuleFor(command => command.ParticipantId).NotEmpty();
+        RuleFor(command => command).Must(command => command.InitiatorId != command.ParticipantId)
+            .WithMessage("You cannot create a direct conversation with yourself.");
+    }
+}
+
+public sealed class CreateDirectConversationCommandHandler(IMessageRepository repository, IClock clock) : IRequestHandler<CreateDirectConversationCommand, ConversationReadDto>
+{
+    public async Task<ConversationReadDto> Handle(CreateDirectConversationCommand request, CancellationToken cancellationToken)
+    {
+        var existingConversation = await repository.GetDirectConversationAsync(request.InitiatorId, request.ParticipantId, cancellationToken);
+        if (existingConversation is not null)
+        {
+            await repository.AddParticipantAsync(existingConversation.Id, request.InitiatorId, clock.UtcNow, cancellationToken);
+            await repository.AddParticipantAsync(existingConversation.Id, request.ParticipantId, clock.UtcNow, cancellationToken);
+            await repository.SaveChangesAsync(cancellationToken);
+
+            return new ConversationReadDto(
+                existingConversation.Id,
+                existingConversation.LastMessage,
+                existingConversation.LastMessageAtUtc,
+                existingConversation.IsGroup,
+                existingConversation.CounterpartUserId);
+        }
+
+        var conversationId = Guid.NewGuid();
+        await repository.CreateDirectConversationAsync(conversationId, request.InitiatorId, request.ParticipantId, clock.UtcNow, cancellationToken);
+        await repository.SaveChangesAsync(cancellationToken);
+
+        return new ConversationReadDto(conversationId, string.Empty, null, false, request.ParticipantId);
     }
 }
 
@@ -158,11 +203,6 @@ public sealed class UpdateConversationMembershipCommandHandler(IMessageRepositor
                 await repository.AddParticipantAsync(request.ConversationId, request.UserId, clock.UtcNow, cancellationToken);
             }
         }
-        else
-        {
-            await repository.RemoveParticipantAsync(request.ConversationId, request.UserId, cancellationToken);
-        }
-
         telemetry.RecordConsumedEvent(request.Joined ? nameof(ConversationJoinedEvent) : nameof(ConversationLeftEvent));
         await repository.SaveChangesAsync(cancellationToken);
     }
@@ -177,11 +217,26 @@ public sealed class GetMessagesByConversationQueryHandler(IMessageRepository rep
     }
 }
 
-public sealed class GetUserConversationsQueryHandler(IMessageRepository repository, IMapper mapper) : IRequestHandler<GetUserConversationsQuery, IReadOnlyCollection<ConversationReadDto>>
+public sealed class GetUserConversationsQueryHandler(IMessageRepository repository) : IRequestHandler<GetUserConversationsQuery, IReadOnlyCollection<ConversationReadDto>>
 {
     public async Task<IReadOnlyCollection<ConversationReadDto>> Handle(GetUserConversationsQuery request, CancellationToken cancellationToken)
     {
         var conversations = await repository.GetUserConversationsAsync(request.UserId, cancellationToken);
-        return mapper.Map<IReadOnlyCollection<ConversationReadDto>>(conversations);
+        return conversations
+            .Where(conversation => conversation.IsGroup || conversation.CounterpartUserId is not null)
+            .GroupBy(conversation => conversation.IsGroup
+                ? $"group:{conversation.Id}"
+                : $"direct:{conversation.CounterpartUserId}")
+            .Select(group => group
+                .OrderByDescending(conversation => conversation.LastMessageAtUtc ?? DateTime.MinValue)
+                .First())
+            .OrderByDescending(conversation => conversation.LastMessageAtUtc ?? DateTime.MinValue)
+            .Select(conversation => new ConversationReadDto(
+                conversation.Id,
+                conversation.LastMessage,
+                conversation.LastMessageAtUtc,
+                conversation.IsGroup,
+                conversation.CounterpartUserId))
+            .ToArray();
     }
 }

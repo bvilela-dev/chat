@@ -94,9 +94,21 @@ public sealed class UserRepository(IdentityDbContext dbContext) : IUserRepositor
             .SingleOrDefaultAsync(user => user.RefreshTokens.Any(token => token.Token == refreshToken), cancellationToken);
     }
 
+    public async Task<IReadOnlyCollection<User>> GetAllAsync(CancellationToken cancellationToken)
+    {
+        return await dbContext.Users
+            .OrderBy(user => user.Name)
+            .ToListAsync(cancellationToken);
+    }
+
     public Task AddAsync(User user, CancellationToken cancellationToken)
     {
         return dbContext.Users.AddAsync(user, cancellationToken).AsTask();
+    }
+
+    public void AddRefreshToken(RefreshToken refreshToken)
+    {
+        dbContext.RefreshTokens.Add(refreshToken);
     }
 
     public Task SaveChangesAsync(CancellationToken cancellationToken)

@@ -1,8 +1,14 @@
 import { CommonModule } from '@angular/common';
 import { Component, inject } from '@angular/core';
-import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { AbstractControl, FormBuilder, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import { AuthService } from '../services/auth.service';
+
+function passwordMatchValidator(control: AbstractControl): ValidationErrors | null {
+  const password = control.get('password')?.value;
+  const confirmPassword = control.get('confirmPassword')?.value;
+  return password && confirmPassword && password !== confirmPassword ? { passwordMismatch: true } : null;
+}
 
 @Component({
   standalone: true,
@@ -11,10 +17,15 @@ import { AuthService } from '../services/auth.service';
     <section class="shell">
       <div class="card">
         <p class="eyebrow">Realtime CQRS Chat</p>
-        <h1>Sign in to your workspace chat</h1>
-        <p class="lede">Entre com sua conta existente para carregar histórico no read side e enviar comandos em tempo real pelo SignalR.</p>
+        <h1>Create your workspace account</h1>
+        <p class="lede">Seu cadastro já gera token JWT, refresh token e entra direto no chat após a criação.</p>
 
         <form [formGroup]="form" (ngSubmit)="submit()">
+          <label>
+            <span>Name</span>
+            <input type="text" formControlName="name" placeholder="Your full name">
+          </label>
+
           <label>
             <span>Email</span>
             <input type="email" formControlName="email" placeholder="you@team.dev">
@@ -22,17 +33,23 @@ import { AuthService } from '../services/auth.service';
 
           <label>
             <span>Password</span>
-            <input type="password" formControlName="password" placeholder="••••••••">
+            <input type="password" formControlName="password" placeholder="Minimum 8 characters">
           </label>
 
-          <button type="submit" [disabled]="form.invalid || loading">{{ loading ? 'Signing in...' : 'Enter chat' }}</button>
+          <label>
+            <span>Confirm password</span>
+            <input type="password" formControlName="confirmPassword" placeholder="Repeat your password">
+          </label>
+
+          <p class="error" *ngIf="form.hasError('passwordMismatch')">Passwords must match.</p>
+          <button type="submit" [disabled]="form.invalid || loading">{{ loading ? 'Creating account...' : 'Create account' }}</button>
         </form>
 
         <p class="error" *ngIf="error">{{ error }}</p>
 
         <p class="switch-copy">
-          New here?
-          <a routerLink="/signup">Create an account</a>
+          Already have an account?
+          <a routerLink="/signin">Go to sign in</a>
         </p>
       </div>
     </section>
@@ -46,7 +63,7 @@ import { AuthService } from '../services/auth.service';
     }
 
     .card {
-      width: min(460px, 100%);
+      width: min(520px, 100%);
       background: var(--panel);
       border: 1px solid var(--panel-border);
       box-shadow: var(--shadow);
@@ -104,7 +121,7 @@ import { AuthService } from '../services/auth.service';
 
     .error {
       color: #b42318;
-      margin-top: 1rem;
+      margin: 0;
     }
 
     .switch-copy {
@@ -120,7 +137,7 @@ import { AuthService } from '../services/auth.service';
     }
   `]
 })
-export class SignInComponent {
+export class SignUpComponent {
   private readonly formBuilder = inject(FormBuilder);
   private readonly authService = inject(AuthService);
   private readonly router = inject(Router);
@@ -129,9 +146,11 @@ export class SignInComponent {
   error = '';
 
   readonly form = this.formBuilder.group({
+    name: ['', [Validators.required, Validators.maxLength(128)]],
     email: ['', [Validators.required, Validators.email]],
-    password: ['', [Validators.required]]
-  });
+    password: ['', [Validators.required, Validators.minLength(8)]],
+    confirmPassword: ['', [Validators.required]]
+  }, { validators: passwordMatchValidator });
 
   constructor() {
     if (this.authService.isAuthenticated()) {
@@ -141,20 +160,22 @@ export class SignInComponent {
 
   submit(): void {
     if (this.form.invalid) {
+      this.form.markAllAsTouched();
       return;
     }
 
     this.loading = true;
     this.error = '';
-    const { email, password } = this.form.getRawValue();
-    this.authService.login(email ?? '', password ?? '').subscribe({
+
+    const { name, email, password } = this.form.getRawValue();
+    this.authService.register(name ?? '', email ?? '', password ?? '').subscribe({
       next: async () => {
         this.loading = false;
         await this.router.navigate(['/chat']);
       },
-      error: () => {
+      error: (errorResponse) => {
         this.loading = false;
-        this.error = 'Unable to sign in with these credentials.';
+        this.error = errorResponse?.error?.title ?? 'Unable to create your account right now.';
       }
     });
   }

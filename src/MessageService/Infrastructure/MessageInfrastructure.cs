@@ -152,9 +152,90 @@ public sealed class MessageRepository(MessageDbContext dbContext) : IMessageRepo
         return dbContext.Conversations.SingleOrDefaultAsync(conversation => conversation.Id == conversationId, cancellationToken);
     }
 
+    public async Task<ConversationSummary?> GetDirectConversationAsync(Guid firstUserId, Guid secondUserId, CancellationToken cancellationToken)
+    {
+        var conversations = await dbContext.Conversations
+            .Where(conversation => !conversation.IsGroup)
+            .Where(conversation => dbContext.ConversationParticipants.Any(participant => participant.ConversationId == conversation.Id && participant.UserId == firstUserId))
+            .Where(conversation => dbContext.ConversationParticipants.Any(participant => participant.ConversationId == conversation.Id && participant.UserId == secondUserId))
+            .Where(conversation => dbContext.ConversationParticipants.Count(participant => participant.ConversationId == conversation.Id) == 2)
+            .Select(conversation => new ConversationSummary(
+                conversation.Id,
+                dbContext.ConversationReadModels
+                    .Where(readModel => readModel.Id == conversation.Id)
+                    .Select(readModel => readModel.LastMessage)
+                    .FirstOrDefault() ?? string.Empty,
+                dbContext.ConversationReadModels
+                    .Where(readModel => readModel.Id == conversation.Id)
+                    .Select(readModel => readModel.LastMessageAtUtc)
+                    .FirstOrDefault(),
+                conversation.IsGroup,
+                dbContext.ConversationParticipants
+                    .Where(participant => participant.ConversationId == conversation.Id && participant.UserId != firstUserId)
+                    .Select(participant => (Guid?)participant.UserId)
+                    .FirstOrDefault()))
+            .ToListAsync(cancellationToken);
+
+        var existingConversation = conversations
+            .OrderByDescending(conversation => conversation.LastMessageAtUtc ?? DateTime.MinValue)
+            .FirstOrDefault();
+
+        if (existingConversation is not null)
+        {
+            return existingConversation;
+        }
+
+        var recoveredConversations = await dbContext.Conversations
+            .Where(conversation => !conversation.IsGroup)
+            .Where(conversation =>
+                dbContext.ConversationParticipants.Any(participant => participant.ConversationId == conversation.Id && participant.UserId == secondUserId) ||
+                dbContext.ConversationParticipantReadModels.Any(participant => participant.ConversationId == conversation.Id && participant.UserId == secondUserId) ||
+                dbContext.Messages.Any(message => message.ConversationId == conversation.Id && message.SenderId == secondUserId))
+            .Where(conversation =>
+                dbContext.ConversationParticipants.Any(participant => participant.ConversationId == conversation.Id && participant.UserId == firstUserId) ||
+                dbContext.ConversationParticipantReadModels.Any(participant => participant.ConversationId == conversation.Id && participant.UserId == firstUserId) ||
+                dbContext.Messages.Any(message => message.ConversationId == conversation.Id && message.SenderId == firstUserId))
+            .Where(conversation => !dbContext.ConversationParticipants.Any(participant =>
+                participant.ConversationId == conversation.Id &&
+                participant.UserId != firstUserId &&
+                participant.UserId != secondUserId))
+            .Where(conversation => !dbContext.ConversationParticipantReadModels.Any(participant =>
+                participant.ConversationId == conversation.Id &&
+                participant.UserId != firstUserId &&
+                participant.UserId != secondUserId))
+            .Where(conversation => !dbContext.Messages.Any(message => message.ConversationId == conversation.Id && message.SenderId != firstUserId && message.SenderId != secondUserId))
+            .Select(conversation => new ConversationSummary(
+                conversation.Id,
+                dbContext.ConversationReadModels
+                    .Where(readModel => readModel.Id == conversation.Id)
+                    .Select(readModel => readModel.LastMessage)
+                    .FirstOrDefault() ?? string.Empty,
+                dbContext.ConversationReadModels
+                    .Where(readModel => readModel.Id == conversation.Id)
+                    .Select(readModel => readModel.LastMessageAtUtc)
+                    .FirstOrDefault(),
+                conversation.IsGroup,
+                secondUserId))
+            .ToListAsync(cancellationToken);
+
+        return recoveredConversations
+            .OrderByDescending(conversation => conversation.LastMessageAtUtc ?? DateTime.MinValue)
+            .FirstOrDefault();
+    }
+
     public Task AddConversationAsync(Conversation conversation, CancellationToken cancellationToken)
     {
         return dbContext.Conversations.AddAsync(conversation, cancellationToken).AsTask();
+    }
+
+    public async Task CreateDirectConversationAsync(Guid conversationId, Guid initiatorId, Guid participantId, DateTime createdAtUtc, CancellationToken cancellationToken)
+    {
+        await dbContext.Conversations.AddAsync(Conversation.Create(conversationId, false, createdAtUtc), cancellationToken);
+        await dbContext.ConversationParticipants.AddAsync(ConversationParticipant.Create(conversationId, initiatorId, createdAtUtc), cancellationToken);
+        await dbContext.ConversationParticipants.AddAsync(ConversationParticipant.Create(conversationId, participantId, createdAtUtc), cancellationToken);
+        await dbContext.ConversationParticipantReadModels.AddAsync(ConversationParticipantReadModel.Create(conversationId, initiatorId), cancellationToken);
+        await dbContext.ConversationParticipantReadModels.AddAsync(ConversationParticipantReadModel.Create(conversationId, participantId), cancellationToken);
+        await dbContext.ConversationReadModels.AddAsync(ConversationReadModel.Create(conversationId), cancellationToken);
     }
 
     public Task<bool> HasParticipantAsync(Guid conversationId, Guid userId, CancellationToken cancellationToken)
@@ -233,16 +314,32 @@ public sealed class MessageRepository(MessageDbContext dbContext) : IMessageRepo
             .ToListAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyCollection<ConversationReadModel>> GetUserConversationsAsync(Guid userId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyCollection<ConversationSummary>> GetUserConversationsAsync(Guid userId, CancellationToken cancellationToken)
     {
-        return await dbContext.ConversationParticipantReadModels
-            .Where(entity => entity.UserId == userId)
-            .Join(dbContext.ConversationReadModels,
-                participant => participant.ConversationId,
-                conversation => conversation.Id,
-                (_, conversation) => conversation)
-            .OrderByDescending(entity => entity.LastMessageAtUtc)
+        var conversations = await dbContext.Conversations
+            .Where(conversation => dbContext.ConversationParticipantReadModels.Any(participant => participant.ConversationId == conversation.Id && participant.UserId == userId))
+            .Select(conversation => new ConversationSummary(
+                conversation.Id,
+                dbContext.ConversationReadModels
+                    .Where(readModel => readModel.Id == conversation.Id)
+                    .Select(readModel => readModel.LastMessage)
+                    .FirstOrDefault() ?? string.Empty,
+                dbContext.ConversationReadModels
+                    .Where(readModel => readModel.Id == conversation.Id)
+                    .Select(readModel => readModel.LastMessageAtUtc)
+                    .FirstOrDefault(),
+                conversation.IsGroup,
+                conversation.IsGroup
+                    ? null
+                    : dbContext.ConversationParticipantReadModels
+                        .Where(participant => participant.ConversationId == conversation.Id && participant.UserId != userId)
+                        .Select(participant => (Guid?)participant.UserId)
+                        .FirstOrDefault()))
             .ToListAsync(cancellationToken);
+
+        return conversations
+            .OrderByDescending(conversation => conversation.LastMessageAtUtc ?? DateTime.MinValue)
+            .ToList();
     }
 
     public Task SaveChangesAsync(CancellationToken cancellationToken)

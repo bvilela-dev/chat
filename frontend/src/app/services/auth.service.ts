@@ -12,10 +12,20 @@ export class AuthService {
   readonly authState$ = this.authStateSubject.asObservable();
   readonly user$ = new BehaviorSubject<UserDto | null>(this.authStateSubject.value?.user ?? null);
 
+  register(name: string, email: string, password: string): Observable<AuthResponse> {
+    return this.http.post<AuthResponse>('/identity/api/auth/register', { name, email, password }).pipe(
+      tap((response) => this.persistState(response))
+    );
+  }
+
   login(email: string, password: string): Observable<AuthResponse> {
     return this.http.post<AuthResponse>('/identity/api/auth/login', { email, password }).pipe(
       tap((response) => this.persistState(response))
     );
+  }
+
+  isAuthenticated(): boolean {
+    return !!this.authStateSubject.value?.accessToken;
   }
 
   getAccessToken(): string | null {

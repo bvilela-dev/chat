@@ -5,6 +5,21 @@ export interface UserDto {
   createdAtUtc: string;
 }
 
+export interface UserStatusDto {
+  userId: string;
+  isOnline: boolean;
+  lastSeenAtUtc: string | null;
+}
+
+export interface OnlineUser {
+  id: string;
+  name: string;
+  email: string;
+  createdAtUtc: string;
+  isOnline: boolean;
+  lastSeenAtUtc: string | null;
+}
+
 export interface AuthResponse {
   accessToken: string;
   accessTokenExpiresAtUtc: string;
@@ -35,4 +50,6 @@ export interface ConversationReadDto {
   id: string;
   lastMessage: string;
   lastMessageAtUtc: string | null;
+  isGroup: boolean;
+  counterpartUserId: string | null;
 }

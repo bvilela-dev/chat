@@ -1,7 +1,6 @@
 using System.Diagnostics.Metrics;
 using System.Net.Http;
 using BuildingBlocks.Contracts;
-using BuildingBlocks.Contracts.Grpc;
 using ChatService.Application;
 using MassTransit;
 using Microsoft.Extensions.Configuration;
@@ -14,20 +13,6 @@ namespace ChatService.Infrastructure;
 public sealed class SystemClock : IClock
 {
     public DateTime UtcNow => DateTime.UtcNow;
-}
-
-public sealed class IdentityValidationClient(UserValidationGrpc.UserValidationGrpcClient client) : IIdentityValidationClient
-{
-    public async Task<ValidatedUser?> ValidateAsync(Guid userId, CancellationToken cancellationToken)
-    {
-        var response = await client.ValidateUserAsync(new ValidateUserRequest { UserId = userId.ToString() }, cancellationToken: cancellationToken);
-        if (!response.Exists || !Guid.TryParse(response.UserId, out var parsedUserId))
-        {
-            return null;
-        }
-
-        return new ValidatedUser(parsedUserId, response.Name, response.Email);
-    }
 }
 
 public sealed class RedisConnectionRegistry(IConnectionMultiplexer connectionMultiplexer) : IConnectionRegistry
@@ -87,15 +72,7 @@ public static class DependencyInjection
         services.AddSingleton<IChatTelemetry, ChatTelemetry>();
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(configuration.GetConnectionString("Redis") ?? "redis:6379"));
         services.AddSingleton<IConnectionRegistry, RedisConnectionRegistry>();
-        services.AddScoped<IIdentityValidationClient, IdentityValidationClient>();
         services.AddScoped<IChatEventPublisher, ChatEventPublisher>();
-
-        services.AddGrpcClient<UserValidationGrpc.UserValidationGrpcClient>(options =>
-            {
-                options.Address = new Uri(configuration["Grpc:Identity"] ?? "http://identity-service:8080");
-            })
-            .AddPolicyHandler(_ => Policy<HttpResponseMessage>.Handle<Exception>().WaitAndRetryAsync(3, attempt => TimeSpan.FromSeconds(Math.Pow(2, attempt))))
-            .AddPolicyHandler(_ => Policy<HttpResponseMessage>.Handle<Exception>().CircuitBreakerAsync(5, TimeSpan.FromMinutes(1)));
 
         services.AddMassTransit(configurationBuilder =>
         {

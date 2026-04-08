@@ -13,6 +13,8 @@ public sealed record SetUserOfflineCommand(Guid UserId) : IRequest<UserStatusDto
 
 public sealed record GetUserStatusQuery(Guid UserId) : IRequest<UserStatusDto>;
 
+public sealed record GetOnlineUsersQuery() : IRequest<IReadOnlyCollection<UserStatusDto>>;
+
 public interface IPresenceStore
 {
     Task<UserPresence> SetOnlineAsync(Guid userId, DateTime occurredAtUtc, CancellationToken cancellationToken);
@@ -20,6 +22,8 @@ public interface IPresenceStore
     Task<UserPresence> SetOfflineAsync(Guid userId, DateTime occurredAtUtc, CancellationToken cancellationToken);
 
     Task<UserPresence> GetStatusAsync(Guid userId, CancellationToken cancellationToken);
+
+    Task<IReadOnlyCollection<UserPresence>> GetOnlineAsync(CancellationToken cancellationToken);
 }
 
 public interface IPresenceEventPublisher
@@ -91,5 +95,14 @@ public sealed class GetUserStatusQueryHandler(IPresenceStore store) : IRequestHa
     {
         var status = await store.GetStatusAsync(request.UserId, cancellationToken);
         return new UserStatusDto(status.UserId, status.IsOnline, status.LastSeenAtUtc);
+    }
+}
+
+public sealed class GetOnlineUsersQueryHandler(IPresenceStore store) : IRequestHandler<GetOnlineUsersQuery, IReadOnlyCollection<UserStatusDto>>
+{
+    public async Task<IReadOnlyCollection<UserStatusDto>> Handle(GetOnlineUsersQuery request, CancellationToken cancellationToken)
+    {
+        var users = await store.GetOnlineAsync(cancellationToken);
+        return users.Select(user => new UserStatusDto(user.UserId, user.IsOnline, user.LastSeenAtUtc)).ToArray();
     }
 }

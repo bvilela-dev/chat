@@ -20,6 +20,8 @@ public sealed record RefreshTokenCommand(string RefreshToken) : IRequest<AuthRes
 
 public sealed record GetUserByIdQuery(Guid UserId) : IRequest<UserDto?>;
 
+public sealed record GetUsersQuery() : IRequest<IReadOnlyCollection<UserDto>>;
+
 public interface IUserRepository
 {
     Task<bool> EmailExistsAsync(string email, CancellationToken cancellationToken);
@@ -30,7 +32,11 @@ public interface IUserRepository
 
     Task<User?> GetByRefreshTokenAsync(string refreshToken, CancellationToken cancellationToken);
 
+    Task<IReadOnlyCollection<User>> GetAllAsync(CancellationToken cancellationToken);
+
     Task AddAsync(User user, CancellationToken cancellationToken);
+
+    void AddRefreshToken(RefreshToken refreshToken);
 
     Task SaveChangesAsync(CancellationToken cancellationToken);
 }
@@ -132,7 +138,8 @@ public sealed class LoginUserCommandHandler(IUserRepository userRepository, IPas
 
         var utcNow = clock.UtcNow;
         var tokens = tokenService.CreateTokenPair(user, utcNow);
-        user.IssueRefreshToken(tokens.RefreshToken, tokens.RefreshTokenExpiresAtUtc, utcNow);
+        var refreshToken = user.IssueRefreshToken(tokens.RefreshToken, tokens.RefreshTokenExpiresAtUtc, utcNow);
+        userRepository.AddRefreshToken(refreshToken);
         await userRepository.SaveChangesAsync(cancellationToken);
 
         return new AuthResponse(tokens.AccessToken, tokens.AccessTokenExpiresAtUtc, tokens.RefreshToken, tokens.RefreshTokenExpiresAtUtc, mapper.Map<UserDto>(user));
@@ -153,7 +160,8 @@ public sealed class RefreshTokenCommandHandler(IUserRepository userRepository, I
 
         activeRefreshToken.Revoke(utcNow);
         var tokens = tokenService.CreateTokenPair(user, utcNow);
-        user.IssueRefreshToken(tokens.RefreshToken, tokens.RefreshTokenExpiresAtUtc, utcNow);
+        var refreshToken = user.IssueRefreshToken(tokens.RefreshToken, tokens.RefreshTokenExpiresAtUtc, utcNow);
+        userRepository.AddRefreshToken(refreshToken);
         await userRepository.SaveChangesAsync(cancellationToken);
 
         return new AuthResponse(tokens.AccessToken, tokens.AccessTokenExpiresAtUtc, tokens.RefreshToken, tokens.RefreshTokenExpiresAtUtc, mapper.Map<UserDto>(user));
@@ -166,6 +174,15 @@ public sealed class GetUserByIdQueryHandler(IUserRepository userRepository, IMap
     {
         var user = await userRepository.GetByIdAsync(request.UserId, cancellationToken);
         return user is null ? null : mapper.Map<UserDto>(user);
+    }
+}
+
+public sealed class GetUsersQueryHandler(IUserRepository userRepository, IMapper mapper) : IRequestHandler<GetUsersQuery, IReadOnlyCollection<UserDto>>
+{
+    public async Task<IReadOnlyCollection<UserDto>> Handle(GetUsersQuery request, CancellationToken cancellationToken)
+    {
+        var users = await userRepository.GetAllAsync(cancellationToken);
+        return mapper.Map<IReadOnlyCollection<UserDto>>(users);
     }
 }
 

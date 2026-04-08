@@ -120,11 +120,14 @@ public sealed class ConversationReadModel
         LastMessageAtUtc = lastMessageAtUtc;
     }
 
-    public static ConversationReadModel Create(Guid id, string lastMessage, DateTime lastMessageAtUtc)
+    public static ConversationReadModel Create(Guid id, string lastMessage = "", DateTime? lastMessageAtUtc = null)
     {
-        var model = new ConversationReadModel { Id = id };
-        model.Update(lastMessage, lastMessageAtUtc);
-        return model;
+        return new ConversationReadModel
+        {
+            Id = id,
+            LastMessage = lastMessage,
+            LastMessageAtUtc = lastMessageAtUtc
+        };
     }
 }
 

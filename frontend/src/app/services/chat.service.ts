@@ -6,17 +6,21 @@ import { ChatRealtimeMessage } from '../models/chat.models';
 @Injectable({ providedIn: 'root' })
 export class ChatService {
   private connection: signalR.HubConnection | null = null;
+  private currentAccessToken: string | null = null;
   private readonly messagesSubject = new BehaviorSubject<ChatRealtimeMessage[]>([]);
 
   readonly messages$ = this.messagesSubject.asObservable();
 
   async connect(accessToken: string): Promise<void> {
-    if (this.connection?.state === signalR.HubConnectionState.Connected) {
+    if (this.connection?.state === signalR.HubConnectionState.Connected && this.currentAccessToken === accessToken) {
       return;
     }
 
+    await this.disconnect();
+    this.currentAccessToken = accessToken;
+
     this.connection = new signalR.HubConnectionBuilder()
-      .withUrl('/chat/hubs/chat', {
+      .withUrl('/ws/chat/hubs/chat', {
         accessTokenFactory: () => accessToken
       })
       .withAutomaticReconnect()
@@ -27,6 +31,24 @@ export class ChatService {
     });
 
     await this.connection.start();
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this.connection) {
+      this.messagesSubject.next([]);
+      this.currentAccessToken = null;
+      return;
+    }
+
+    this.connection.off('messageReceived');
+
+    if (this.connection.state !== signalR.HubConnectionState.Disconnected) {
+      await this.connection.stop();
+    }
+
+    this.connection = null;
+    this.currentAccessToken = null;
+    this.messagesSubject.next([]);
   }
 
   async joinConversation(conversationId: string): Promise<void> {

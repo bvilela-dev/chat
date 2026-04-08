@@ -25,4 +25,8 @@ export class ChatQueryService {
         })))
       );
   }
+
+  createDirectConversation(participantId: string): Observable<ConversationReadDto> {
+    return this.http.post<ConversationReadDto>('/messages/api/conversations/direct', { participantId });
+  }
 }

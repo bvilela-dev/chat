@@ -10,6 +10,12 @@ namespace PresenceService.API.Controllers;
 [Route("api/presence")]
 public sealed class PresenceController(ISender sender) : ControllerBase
 {
+    [HttpGet("online")]
+    public Task<IReadOnlyCollection<UserStatusDto>> GetOnline(CancellationToken cancellationToken)
+    {
+        return sender.Send(new GetOnlineUsersQuery(), cancellationToken);
+    }
+
     [HttpPost("online/{userId:guid}")]
     public Task<UserStatusDto> SetOnline(Guid userId, CancellationToken cancellationToken)
     {

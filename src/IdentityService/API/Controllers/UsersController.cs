@@ -10,6 +10,13 @@ namespace IdentityService.API.Controllers;
 [Route("api/users")]
 public sealed class UsersController(ISender sender) : ControllerBase
 {
+    [HttpGet]
+    [ProducesResponseType<IReadOnlyCollection<UserDto>>(StatusCodes.Status200OK)]
+    public Task<IReadOnlyCollection<UserDto>> GetAll(CancellationToken cancellationToken)
+    {
+        return sender.Send(new GetUsersQuery(), cancellationToken);
+    }
+
     [HttpGet("{id:guid}")]
     [ProducesResponseType<UserDto>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
