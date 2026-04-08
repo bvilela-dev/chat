@@ -16,7 +16,7 @@ var jwtKey = builder.Configuration["Jwt:Key"] ?? "super-secret-development-key-c
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 builder.Services.AddSignalR()
     .AddStackExchangeRedis(builder.Configuration.GetConnectionString("Redis") ?? "redis:6379");
 builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(SendMessageCommand).Assembly));
@@ -73,12 +73,11 @@ builder.Services.AddOpenTelemetry()
 var app = builder.Build();
 
 app.UseMiddleware<ChatExceptionMiddleware>();
-app.UseSwagger();
-app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
+app.MapOpenApi();
 app.Run();

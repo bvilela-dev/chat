@@ -5,6 +5,7 @@ obj/
 node_modules/
 frontend/dist/
 frontend/.angular/
+.local/
 *.user
 *.suo
 *.db

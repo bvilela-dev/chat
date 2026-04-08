@@ -15,7 +15,7 @@ var jwtKey = builder.Configuration["Jwt:Key"] ?? "super-secret-development-key-c
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(SetUserOnlineCommand).Assembly));
 builder.Services.AddValidatorsFromAssembly(typeof(SetUserOnlineCommand).Assembly);
 builder.Services.AddPresenceInfrastructure(builder.Configuration);
@@ -51,11 +51,10 @@ builder.Services.AddOpenTelemetry()
 var app = builder.Build();
 
 app.UseMiddleware<PresenceExceptionMiddleware>();
-app.UseSwagger();
-app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
+app.MapOpenApi();
 app.Run();

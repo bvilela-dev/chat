@@ -10,7 +10,7 @@ var jwtKey = builder.Configuration["Jwt:Key"] ?? "super-secret-development-key-c
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 builder.Services.AddReverseProxy().LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 	.AddJwtBearer(options =>
@@ -52,8 +52,6 @@ builder.Services.AddOpenTelemetry()
 
 var app = builder.Build();
 
-app.UseSwagger();
-app.UseSwaggerUI();
 app.UseCors("frontend");
 app.UseAuthentication();
 app.UseAuthorization();
@@ -61,4 +59,5 @@ app.MapControllers();
 app.MapReverseProxy();
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
+app.MapOpenApi();
 app.Run();

@@ -18,7 +18,7 @@ var jwtOptions = builder.Configuration.GetSection(JwtOptions.SectionName).Get<Jw
 builder.Services.AddControllers();
 builder.Services.AddGrpc();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 builder.Services.AddSingleton<IMapper>(_ => new MapperConfiguration(configuration => configuration.AddMaps(typeof(IdentityMappingProfile).Assembly)).CreateMapper());
 builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(RegisterUserCommand).Assembly));
 builder.Services.AddValidatorsFromAssembly(typeof(RegisterUserCommand).Assembly);
@@ -62,12 +62,11 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
-app.UseSwagger();
-app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<UserValidationGrpcService>();
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
+app.MapOpenApi();
 app.Run();

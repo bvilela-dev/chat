@@ -17,7 +17,7 @@ var jwtKey = builder.Configuration["Jwt:Key"] ?? "super-secret-development-key-c
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 builder.Services.AddSingleton<IMapper>(_ => new MapperConfiguration(configuration => configuration.AddMaps(typeof(MessageMappingProfile).Assembly)).CreateMapper());
 builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(GetMessagesByConversationQuery).Assembly));
 builder.Services.AddValidatorsFromAssembly(typeof(GetMessagesByConversationQuery).Assembly);
@@ -61,11 +61,10 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseMiddleware<MessageExceptionMiddleware>();
-app.UseSwagger();
-app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
+app.MapOpenApi();
 app.Run();

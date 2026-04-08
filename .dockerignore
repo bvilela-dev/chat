@@ -1,0 +1,9 @@
+.git
+.gitignore
+.local
+**/bin
+**/obj
+frontend/node_modules
+frontend/dist
+frontend/.angular
+deploy/docker/*.log

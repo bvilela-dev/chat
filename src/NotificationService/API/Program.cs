@@ -9,7 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(NotifyOfflineUsersCommand).Assembly));
 builder.Services.AddNotificationInfrastructure(builder.Configuration);
 builder.Services.AddHealthChecks();
@@ -29,9 +29,8 @@ builder.Services.AddOpenTelemetry()
 
 var app = builder.Build();
 
-app.UseSwagger();
-app.UseSwaggerUI();
 app.MapControllers();
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
+app.MapOpenApi();
 app.Run();
