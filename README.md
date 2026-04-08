@@ -2,6 +2,8 @@
 
 Distributed WhatsApp-like chat system built on .NET 10 and C# 13 with Clean Architecture, SOLID, CQRS, SignalR, RabbitMQ, Redis, PostgreSQL, Angular, and OpenTelemetry.
 
+[English](#english-summary) | [PT-BR](#pt-br)
+
 ## English Summary
 
 ### Services
