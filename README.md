@@ -246,7 +246,7 @@ O frontend já faz proxy para o gateway internamente, então você não precisa 
 Se quiser testar APIs ou o RabbitMQ manualmente, use `port-forward`:
 
 ```bash
-kubectl port-forward svc/api-gateway 8080:80 -n chat-platform
+kubectl port-forward svc/api-gateway 8080:8080 -n chat-platform
 kubectl port-forward svc/rabbitmq 15672:15672 -n chat-platform
 ```
 
@@ -261,6 +261,7 @@ Depois disso, acesse:
 - Os serviços da aplicação usam `imagePullPolicy: IfNotPresent`, então imagens importadas no `containerd` do k3s podem ser reutilizadas sem pull remoto.
 - Identity Service e Message Service aplicam migrations automaticamente quando iniciam.
 - O Ingress assume que o Traefik padrão do k3s está ativo.
+- O frontend faz proxy interno para `api-gateway:8080`, então o `Service` do gateway dentro do cluster também precisa expor a porta `8080`.
 - Se você trocar o namespace, os nomes de serviço, o host do Ingress ou as imagens, ajuste o manifesto antes do `kubectl apply`.
 
 ### 10. Limpeza do ambiente
