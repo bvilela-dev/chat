@@ -1,0 +1,203 @@
+services:
+  postgres-identity:
+    image: postgres:17-alpine
+    container_name: postgres-identity
+    environment:
+      POSTGRES_DB: chat_identity
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_identity_data:/var/lib/postgresql/data
+
+  postgres-message:
+    image: postgres:17-alpine
+    container_name: postgres-message
+    environment:
+      POSTGRES_DB: chat_message
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_message_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ../observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: prometheus
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ../observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ../observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
+  identity-service:
+    build:
+      context: ../../
+      dockerfile: src/IdentityService/API/Dockerfile
+    environment:
+      ConnectionStrings__IdentityDatabase: Host=postgres-identity;Port=5432;Database=chat_identity;Username=postgres;Password=postgres
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: guest
+      RabbitMq__Password: guest
+      Jwt__Issuer: chat-identity
+      Jwt__Audience: chat-clients
+      Jwt__Key: super-secret-development-key-change-me
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - postgres-identity
+      - rabbitmq
+      - otel-collector
+    ports:
+      - "8081:8080"
+
+  chat-service:
+    build:
+      context: ../../
+      dockerfile: src/ChatService/API/Dockerfile
+    environment:
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: guest
+      RabbitMq__Password: guest
+      Jwt__Issuer: chat-identity
+      Jwt__Audience: chat-clients
+      Jwt__Key: super-secret-development-key-change-me
+      Grpc__Identity: http://identity-service:8080
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - identity-service
+      - redis
+      - rabbitmq
+      - otel-collector
+    ports:
+      - "8082:8080"
+
+  message-service:
+    build:
+      context: ../../
+      dockerfile: src/MessageService/API/Dockerfile
+    environment:
+      ConnectionStrings__MessageDatabase: Host=postgres-message;Port=5432;Database=chat_message;Username=postgres;Password=postgres
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: guest
+      RabbitMq__Password: guest
+      Jwt__Issuer: chat-identity
+      Jwt__Audience: chat-clients
+      Jwt__Key: super-secret-development-key-change-me
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - postgres-message
+      - rabbitmq
+      - otel-collector
+    ports:
+      - "8083:8080"
+
+  presence-service:
+    build:
+      context: ../../
+      dockerfile: src/PresenceService/API/Dockerfile
+    environment:
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: guest
+      RabbitMq__Password: guest
+      Jwt__Issuer: chat-identity
+      Jwt__Audience: chat-clients
+      Jwt__Key: super-secret-development-key-change-me
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - redis
+      - rabbitmq
+      - otel-collector
+    ports:
+      - "8084:8080"
+
+  notification-service:
+    build:
+      context: ../../
+      dockerfile: src/NotificationService/API/Dockerfile
+    environment:
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: guest
+      RabbitMq__Password: guest
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - redis
+      - rabbitmq
+      - otel-collector
+    ports:
+      - "8085:8080"
+
+  api-gateway:
+    build:
+      context: ../../
+      dockerfile: src/ApiGateway/Dockerfile
+    environment:
+      Jwt__Issuer: chat-identity
+      Jwt__Audience: chat-clients
+      Jwt__Key: super-secret-development-key-change-me
+      ReverseProxy__Clusters__identity-cluster__Destinations__identity__Address: http://identity-service:8080/
+      ReverseProxy__Clusters__message-cluster__Destinations__message__Address: http://message-service:8080/
+      ReverseProxy__Clusters__presence-cluster__Destinations__presence__Address: http://presence-service:8080/
+      ReverseProxy__Clusters__notification-cluster__Destinations__notification__Address: http://notification-service:8080/
+      ReverseProxy__Clusters__chat-cluster__Destinations__chat__Address: http://chat-service:8080/
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - identity-service
+      - chat-service
+      - message-service
+      - presence-service
+      - notification-service
+      - otel-collector
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ../../
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - api-gateway
+    ports:
+      - "4200:80"
+
+volumes:
+  postgres_identity_data:
+  postgres_message_data:

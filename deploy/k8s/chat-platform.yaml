@@ -1,0 +1,531 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chat-platform
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chat-config
+  namespace: chat-platform
+data:
+  JWT_ISSUER: chat-identity
+  JWT_AUDIENCE: chat-clients
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.chat-platform.svc.cluster.local:4317
+  REDIS_CONNECTION: redis.chat-platform.svc.cluster.local:6379
+  RABBITMQ_HOST: rabbitmq.chat-platform.svc.cluster.local
+  IDENTITY_DATABASE: Host=postgres-identity.chat-platform.svc.cluster.local;Port=5432;Database=chat_identity;Username=postgres;Password=$(POSTGRES_PASSWORD)
+  MESSAGE_DATABASE: Host=postgres-message.chat-platform.svc.cluster.local;Port=5432;Database=chat_message;Username=postgres;Password=$(POSTGRES_PASSWORD)
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chat-secrets
+  namespace: chat-platform
+type: Opaque
+stringData:
+  JWT_KEY: super-secret-development-key-change-me
+  POSTGRES_PASSWORD: postgres
+  RABBITMQ_USERNAME: guest
+  RABBITMQ_PASSWORD: guest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-service
+  namespace: chat-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: identity-service
+  template:
+    metadata:
+      labels:
+        app: identity-service
+    spec:
+      containers:
+        - name: identity-service
+          image: bvilela/chat-identity:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__IdentityDatabase
+              value: Host=postgres-identity;Port=5432;Database=chat_identity;Username=postgres;Password=postgres
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-service
+  namespace: chat-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chat-service
+  template:
+    metadata:
+      labels:
+        app: chat-service
+    spec:
+      containers:
+        - name: chat-service
+          image: bvilela/chat-write:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__Redis
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: REDIS_CONNECTION
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: Grpc__Identity
+              value: http://identity-service.chat-platform.svc.cluster.local:8080
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-service
+  namespace: chat-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: message-service
+  template:
+    metadata:
+      labels:
+        app: message-service
+    spec:
+      containers:
+        - name: message-service
+          image: bvilela/chat-message:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__MessageDatabase
+              value: Host=postgres-message;Port=5432;Database=chat_message;Username=postgres;Password=postgres
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presence-service
+  namespace: chat-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: presence-service
+  template:
+    metadata:
+      labels:
+        app: presence-service
+    spec:
+      containers:
+        - name: presence-service
+          image: bvilela/chat-presence:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__Redis
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: REDIS_CONNECTION
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: chat-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      containers:
+        - name: notification-service
+          image: bvilela/chat-notification:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__Redis
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: REDIS_CONNECTION
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: chat-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: bvilela/chat-gateway:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: ReverseProxy__Clusters__identity-cluster__Destinations__identity__Address
+              value: http://identity-service:8080/
+            - name: ReverseProxy__Clusters__message-cluster__Destinations__message__Address
+              value: http://message-service:8080/
+            - name: ReverseProxy__Clusters__presence-cluster__Destinations__presence__Address
+              value: http://presence-service:8080/
+            - name: ReverseProxy__Clusters__notification-cluster__Destinations__notification__Address
+              value: http://notification-service:8080/
+            - name: ReverseProxy__Clusters__chat-cluster__Destinations__chat__Address
+              value: http://chat-service:8080/
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: bvilela/chat-frontend:latest
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: identity-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: chat-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: message-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: message-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presence-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: presence-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: notification-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: chat-platform
+spec:
+  type: LoadBalancer
+  selector:
+    app: api-gateway
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: chat-platform
+spec:
+  type: LoadBalancer
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: chat-service-hpa
+  namespace: chat-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: chat-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: chat_signalr_connections
+        target:
+          type: AverageValue
+          averageValue: "500"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: message-service-hpa
+  namespace: chat-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: message-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: External
+      external:
+        metric:
+          name: rabbitmq_queue_depth
+          selector:
+            matchLabels:
+              queue: chat.persist
+        target:
+          type: AverageValue
+          averageValue: "100"
