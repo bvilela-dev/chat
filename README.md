@@ -103,9 +103,9 @@ As migrations desses dois serviços são executadas automaticamente no startup.
 
 ## Kubernetes Step By Step (PT-BR)
 
-Se você estiver usando k3s, o manifesto recomendado agora é `deploy/k8s/chat-platform-k3s.yaml`.
+Se você estiver usando k3s, o fluxo recomendado agora é usar os scripts `./start.sh` e `./stop.sh` na raiz do projeto.
 
-Esse arquivo já inclui:
+Eles usam exclusivamente o manifesto `deploy/k8s/chat-platform-k3s.yaml`, que já inclui:
 
 - PostgreSQL de identidade
 - PostgreSQL de mensagens
@@ -115,7 +115,13 @@ Esse arquivo já inclui:
 - todos os serviços da aplicação
 - Ingress via Traefik para o frontend
 
-O manifesto antigo `deploy/k8s/chat-platform.yaml` continua útil como base mais genérica, mas ele pressupõe infraestrutura externa já existente. Para k3s, use o arquivo `chat-platform-k3s.yaml`.
+Os scripts fazem o seguinte:
+
+- build das imagens Docker da aplicação
+- import das imagens no `containerd` do k3s
+- aplicação do manifesto Kubernetes
+- espera dos rollouts até tudo ficar pronto
+- criação automática da entrada `chat.local` no `/etc/hosts`
 
 ### 1. Pré-requisitos
 
@@ -146,78 +152,25 @@ Se o seu `kubectl` ainda não estiver apontando para o k3s, exporte o kubeconfig
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 ```
 
-### 3. Crie o namespace
+### 3. Inicie tudo com um único comando
 
 ```bash
-kubectl create namespace chat-platform
+chmod +x start.sh stop.sh
+./start.sh
 ```
 
-Se ele já existir, o comando pode falhar sem problema. Nesse caso, siga para o próximo passo.
-
-### 4. Gere as imagens da aplicação
-
-O manifesto atual referencia estas imagens:
-
-- `bvilela/chat-identity:latest`
-- `bvilela/chat-write:latest`
-- `bvilela/chat-message:latest`
-- `bvilela/chat-presence:latest`
-- `bvilela/chat-notification:latest`
-- `bvilela/chat-gateway:latest`
-- `bvilela/chat-frontend:latest`
-
-Se você usar outro registry ou outro namespace, altere os campos `image:` no arquivo `deploy/k8s/chat-platform-k3s.yaml`.
-
-Exemplo de build local com as mesmas tags do manifesto:
+Se você quiser pular o rebuild ou o reimport das imagens em execuções seguintes:
 
 ```bash
-docker build -t bvilela/chat-identity:latest -f src/IdentityService/API/Dockerfile .
-docker build -t bvilela/chat-write:latest -f src/ChatService/API/Dockerfile .
-docker build -t bvilela/chat-message:latest -f src/MessageService/API/Dockerfile .
-docker build -t bvilela/chat-presence:latest -f src/PresenceService/API/Dockerfile .
-docker build -t bvilela/chat-notification:latest -f src/NotificationService/API/Dockerfile .
-docker build -t bvilela/chat-gateway:latest -f src/ApiGateway/Dockerfile .
-docker build -t bvilela/chat-frontend:latest -f frontend/Dockerfile .
+SKIP_BUILD=1 SKIP_IMPORT=1 ./start.sh
 ```
 
-### 5. Importe as imagens no k3s
-
-Como o k3s usa `containerd`, imagens buildadas no Docker local não ficam automaticamente disponíveis para o cluster.
-
-No próprio nó do k3s, importe as imagens assim:
-
-```bash
-docker save \
-	bvilela/chat-identity:latest \
-	bvilela/chat-write:latest \
-	bvilela/chat-message:latest \
-	bvilela/chat-presence:latest \
-	bvilela/chat-notification:latest \
-	bvilela/chat-gateway:latest \
-	bvilela/chat-frontend:latest \
-	| sudo k3s ctr images import -
-```
-
-Se você estiver buildando em outra máquina que não é o nó do k3s, o caminho mais estável é publicar as imagens em um registry acessível pelo cluster.
-
-### 6. Aplique o manifesto do k3s
-
-```bash
-kubectl apply -f deploy/k8s/chat-platform-k3s.yaml
-```
-
-### 7. Aguarde os deployments ficarem prontos
+### 4. Confira o estado do cluster
 
 ```bash
 kubectl get pods -n chat-platform
-kubectl rollout status deployment/identity-service -n chat-platform
-kubectl rollout status deployment/chat-service -n chat-platform
-kubectl rollout status deployment/message-service -n chat-platform
-kubectl rollout status deployment/presence-service -n chat-platform
-kubectl rollout status deployment/notification-service -n chat-platform
-kubectl rollout status deployment/api-gateway -n chat-platform
-kubectl rollout status deployment/frontend -n chat-platform
 kubectl get pvc -n chat-platform
+kubectl get ingress -n chat-platform
 ```
 
 Se algum pod falhar, inspecione com:
@@ -227,15 +180,9 @@ kubectl describe pod <pod-name> -n chat-platform
 kubectl logs <pod-name> -n chat-platform
 ```
 
-### 8. Exponha o frontend no k3s
+### 5. Acesse a aplicação
 
-O manifesto do k3s usa Ingress com Traefik e expõe o frontend no host `chat.local`.
-
-Adicione uma entrada no seu `/etc/hosts` apontando para o IP do nó do k3s:
-
-```bash
-<IP_DO_NO_K3S> chat.local
-```
+O script `start.sh` cria automaticamente a entrada `chat.local` no `/etc/hosts` com o IP do nó do k3s.
 
 Depois acesse:
 
@@ -255,7 +202,7 @@ Depois disso, acesse:
 - Gateway: `http://localhost:8080`
 - RabbitMQ Management: `http://localhost:15672`
 
-### 9. Observações importantes para ambiente local
+### 6. Observações importantes para ambiente local
 
 - O manifesto `chat-platform-k3s.yaml` já inclui a infraestrutura mínima para rodar localmente no k3s.
 - Os serviços da aplicação usam `imagePullPolicy: IfNotPresent`, então imagens importadas no `containerd` do k3s podem ser reutilizadas sem pull remoto.
@@ -264,16 +211,10 @@ Depois disso, acesse:
 - O frontend faz proxy interno para `api-gateway:8080`, então o `Service` do gateway dentro do cluster também precisa expor a porta `8080`.
 - Se você trocar o namespace, os nomes de serviço, o host do Ingress ou as imagens, ajuste o manifesto antes do `kubectl apply`.
 
-### 10. Limpeza do ambiente
+### 7. Derrube tudo
 
 Para remover a aplicação:
 
 ```bash
-kubectl delete -f deploy/k8s/chat-platform-k3s.yaml
-```
-
-Se quiser remover também o namespace:
-
-```bash
-kubectl delete namespace chat-platform
+./stop.sh
 ```
