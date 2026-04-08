@@ -103,41 +103,47 @@ As migrations desses dois serviços são executadas automaticamente no startup.
 
 ## Kubernetes Step By Step (PT-BR)
 
-O manifesto principal está em `deploy/k8s/chat-platform.yaml`.
+Se você estiver usando k3s, o manifesto recomendado agora é `deploy/k8s/chat-platform-k3s.yaml`.
 
-Importante: esse manifesto sobe a camada de aplicação, mas espera que as dependências de infraestrutura já existam no cluster com estes nomes de serviço dentro do namespace `chat-platform`:
+Esse arquivo já inclui:
 
-- `postgres-identity`
-- `postgres-message`
-- `redis`
-- `rabbitmq`
-- `otel-collector`
+- PostgreSQL de identidade
+- PostgreSQL de mensagens
+- Redis
+- RabbitMQ
+- OpenTelemetry Collector
+- todos os serviços da aplicação
+- Ingress via Traefik para o frontend
 
-Se esses serviços não existirem, os pods da aplicação não vão inicializar corretamente.
+O manifesto antigo `deploy/k8s/chat-platform.yaml` continua útil como base mais genérica, mas ele pressupõe infraestrutura externa já existente. Para k3s, use o arquivo `chat-platform-k3s.yaml`.
 
 ### 1. Pré-requisitos
 
 Você precisa ter instalado:
 
 - `kubectl`
-- Um cluster Kubernetes funcional, como `kind`, `minikube`, Docker Desktop Kubernetes ou um cluster remoto
+- `k3s` funcional
 - `docker` para build das imagens
-- Um registry acessível pelo cluster, caso você não use as imagens já publicadas
+- acesso com `sudo` no nó do k3s para importar imagens no `containerd`
 
-### 2. Crie ou selecione o cluster
+Observações importantes para k3s:
 
-Exemplo com `kind`:
+- o manifesto usa PVCs simples, compatíveis com o `local-path-provisioner` padrão do k3s
+- o acesso externo usa Ingress com classe `traefik`, que normalmente já vem habilitada no k3s
+
+### 2. Verifique o cluster k3s
+
+Confirme se o cluster está respondendo:
 
 ```bash
-kind create cluster --name chat-platform
 kubectl cluster-info
+kubectl get nodes
 ```
 
-Exemplo com `minikube`:
+Se o seu `kubectl` ainda não estiver apontando para o k3s, exporte o kubeconfig correto. Em instalações padrão:
 
 ```bash
-minikube start
-kubectl cluster-info
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 ```
 
 ### 3. Crie o namespace
@@ -148,27 +154,7 @@ kubectl create namespace chat-platform
 
 Se ele já existir, o comando pode falhar sem problema. Nesse caso, siga para o próximo passo.
 
-### 4. Provisione a infraestrutura base no namespace
-
-Antes de aplicar a aplicação, garanta que existam no namespace `chat-platform`:
-
-- PostgreSQL para identidade com service name `postgres-identity`
-- PostgreSQL para mensagens com service name `postgres-message`
-- Redis com service name `redis`
-- RabbitMQ com service name `rabbitmq`
-- OpenTelemetry Collector com service name `otel-collector`
-
-Você pode subir esses componentes com Helm, manifests próprios ou operadores, desde que mantenha os mesmos nomes de serviço esperados pelo arquivo `deploy/k8s/chat-platform.yaml`.
-
-Para conferir se a infraestrutura está pronta:
-
-```bash
-kubectl get svc -n chat-platform
-```
-
-Você deve ver pelo menos os serviços citados acima antes de seguir.
-
-### 5. Gere e publique as imagens da aplicação
+### 4. Gere as imagens da aplicação
 
 O manifesto atual referencia estas imagens:
 
@@ -180,7 +166,7 @@ O manifesto atual referencia estas imagens:
 - `bvilela/chat-gateway:latest`
 - `bvilela/chat-frontend:latest`
 
-Se você usar outro registry ou outro namespace, altere os campos `image:` no arquivo `deploy/k8s/chat-platform.yaml`.
+Se você usar outro registry ou outro namespace, altere os campos `image:` no arquivo `deploy/k8s/chat-platform-k3s.yaml`.
 
 Exemplo de build local com as mesmas tags do manifesto:
 
@@ -194,12 +180,30 @@ docker build -t bvilela/chat-gateway:latest -f src/ApiGateway/Dockerfile .
 docker build -t bvilela/chat-frontend:latest -f frontend/Dockerfile .
 ```
 
-Se o seu cluster não conseguir puxar imagens locais, envie essas imagens para um registry acessível por ele.
+### 5. Importe as imagens no k3s
 
-### 6. Aplique o manifesto da aplicação
+Como o k3s usa `containerd`, imagens buildadas no Docker local não ficam automaticamente disponíveis para o cluster.
+
+No próprio nó do k3s, importe as imagens assim:
 
 ```bash
-kubectl apply -f deploy/k8s/chat-platform.yaml
+docker save \
+	bvilela/chat-identity:latest \
+	bvilela/chat-write:latest \
+	bvilela/chat-message:latest \
+	bvilela/chat-presence:latest \
+	bvilela/chat-notification:latest \
+	bvilela/chat-gateway:latest \
+	bvilela/chat-frontend:latest \
+	| sudo k3s ctr images import -
+```
+
+Se você estiver buildando em outra máquina que não é o nó do k3s, o caminho mais estável é publicar as imagens em um registry acessível pelo cluster.
+
+### 6. Aplique o manifesto do k3s
+
+```bash
+kubectl apply -f deploy/k8s/chat-platform-k3s.yaml
 ```
 
 ### 7. Aguarde os deployments ficarem prontos
@@ -213,6 +217,7 @@ kubectl rollout status deployment/presence-service -n chat-platform
 kubectl rollout status deployment/notification-service -n chat-platform
 kubectl rollout status deployment/api-gateway -n chat-platform
 kubectl rollout status deployment/frontend -n chat-platform
+kubectl get pvc -n chat-platform
 ```
 
 Se algum pod falhar, inspecione com:
@@ -222,32 +227,48 @@ kubectl describe pod <pod-name> -n chat-platform
 kubectl logs <pod-name> -n chat-platform
 ```
 
-### 8. Exponha o frontend e o gateway
+### 8. Exponha o frontend no k3s
 
-O manifesto define `frontend` e `api-gateway` como `LoadBalancer`. Em cloud providers isso pode ser suficiente. Em clusters locais, normalmente o jeito mais simples é usar `port-forward`:
+O manifesto do k3s usa Ingress com Traefik e expõe o frontend no host `chat.local`.
+
+Adicione uma entrada no seu `/etc/hosts` apontando para o IP do nó do k3s:
 
 ```bash
-kubectl port-forward svc/frontend 4200:80 -n chat-platform
+<IP_DO_NO_K3S> chat.local
+```
+
+Depois acesse:
+
+- Frontend: `http://chat.local`
+
+O frontend já faz proxy para o gateway internamente, então você não precisa expor o `api-gateway` separadamente para o uso normal da aplicação.
+
+Se quiser testar APIs ou o RabbitMQ manualmente, use `port-forward`:
+
+```bash
 kubectl port-forward svc/api-gateway 8080:80 -n chat-platform
+kubectl port-forward svc/rabbitmq 15672:15672 -n chat-platform
 ```
 
 Depois disso, acesse:
 
-- Frontend: `http://localhost:4200`
 - Gateway: `http://localhost:8080`
+- RabbitMQ Management: `http://localhost:15672`
 
 ### 9. Observações importantes para ambiente local
 
-- Os HPAs do manifesto usam métricas externas. Em clusters locais sem adapter de métricas externas, isso não impede a aplicação de subir, mas o autoscaling baseado nessas métricas não vai funcionar.
+- O manifesto `chat-platform-k3s.yaml` já inclui a infraestrutura mínima para rodar localmente no k3s.
+- Os serviços da aplicação usam `imagePullPolicy: IfNotPresent`, então imagens importadas no `containerd` do k3s podem ser reutilizadas sem pull remoto.
 - Identity Service e Message Service aplicam migrations automaticamente quando iniciam.
-- Se você trocar o namespace, os nomes de serviço ou as imagens, ajuste o manifesto antes do `kubectl apply`.
+- O Ingress assume que o Traefik padrão do k3s está ativo.
+- Se você trocar o namespace, os nomes de serviço, o host do Ingress ou as imagens, ajuste o manifesto antes do `kubectl apply`.
 
 ### 10. Limpeza do ambiente
 
 Para remover a aplicação:
 
 ```bash
-kubectl delete -f deploy/k8s/chat-platform.yaml
+kubectl delete -f deploy/k8s/chat-platform-k3s.yaml
 ```
 
 Se quiser remover também o namespace:

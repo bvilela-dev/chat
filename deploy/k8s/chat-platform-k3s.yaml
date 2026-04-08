@@ -1,0 +1,826 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chat-platform
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chat-secrets
+  namespace: chat-platform
+type: Opaque
+stringData:
+  JWT_KEY: super-secret-development-key-change-me
+  POSTGRES_PASSWORD: postgres
+  RABBITMQ_USERNAME: guest
+  RABBITMQ_PASSWORD: guest
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chat-config
+  namespace: chat-platform
+data:
+  JWT_ISSUER: chat-identity
+  JWT_AUDIENCE: chat-clients
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  REDIS_CONNECTION: redis:6379
+  RABBITMQ_HOST: rabbitmq
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: chat-platform
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+          http:
+
+    processors:
+      batch:
+
+    exporters:
+      debug:
+        verbosity: detailed
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-identity-data
+  namespace: chat-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-message-data
+  namespace: chat-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rabbitmq-data
+  namespace: chat-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-identity
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-identity
+  template:
+    metadata:
+      labels:
+        app: postgres-identity
+    spec:
+      containers:
+        - name: postgres-identity
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: chat_identity
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-identity-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-identity
+  namespace: chat-platform
+spec:
+  selector:
+    app: postgres-identity
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-message
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-message
+  template:
+    metadata:
+      labels:
+        app: postgres-message
+    spec:
+      containers:
+        - name: postgres-message
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: chat_message
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-message-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-message
+  namespace: chat-platform
+spec:
+  selector:
+    app: postgres-message
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: chat-platform
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4-management
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5672
+            - containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rabbitmq-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: chat-platform
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.123.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/otelcol-contrib/config.yaml
+          ports:
+            - containerPort: 4317
+            - containerPort: 4318
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol-contrib
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: chat-platform
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: grpc
+      port: 4317
+      targetPort: 4317
+    - name: http
+      port: 4318
+      targetPort: 4318
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-service
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-service
+  template:
+    metadata:
+      labels:
+        app: identity-service
+    spec:
+      containers:
+        - name: identity-service
+          image: bvilela/chat-identity:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: POSTGRES_PASSWORD
+            - name: ConnectionStrings__IdentityDatabase
+              value: Host=postgres-identity;Port=5432;Database=chat_identity;Username=postgres;Password=$(POSTGRES_PASSWORD)
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-service
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chat-service
+  template:
+    metadata:
+      labels:
+        app: chat-service
+    spec:
+      containers:
+        - name: chat-service
+          image: bvilela/chat-write:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__Redis
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: REDIS_CONNECTION
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: Grpc__Identity
+              value: http://identity-service:8080
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-service
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: message-service
+  template:
+    metadata:
+      labels:
+        app: message-service
+    spec:
+      containers:
+        - name: message-service
+          image: bvilela/chat-message:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: POSTGRES_PASSWORD
+            - name: ConnectionStrings__MessageDatabase
+              value: Host=postgres-message;Port=5432;Database=chat_message;Username=postgres;Password=$(POSTGRES_PASSWORD)
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presence-service
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: presence-service
+  template:
+    metadata:
+      labels:
+        app: presence-service
+    spec:
+      containers:
+        - name: presence-service
+          image: bvilela/chat-presence:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__Redis
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: REDIS_CONNECTION
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      containers:
+        - name: notification-service
+          image: bvilela/chat-notification:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ConnectionStrings__Redis
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: REDIS_CONNECTION
+            - name: RabbitMq__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMq__Username
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RabbitMq__Password
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: RABBITMQ_PASSWORD
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: bvilela/chat-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: Jwt__Issuer
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_ISSUER
+            - name: Jwt__Audience
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: JWT_AUDIENCE
+            - name: Jwt__Key
+              valueFrom:
+                secretKeyRef:
+                  name: chat-secrets
+                  key: JWT_KEY
+            - name: ReverseProxy__Clusters__identity-cluster__Destinations__identity__Address
+              value: http://identity-service:8080/
+            - name: ReverseProxy__Clusters__message-cluster__Destinations__message__Address
+              value: http://message-service:8080/
+            - name: ReverseProxy__Clusters__presence-cluster__Destinations__presence__Address
+              value: http://presence-service:8080/
+            - name: ReverseProxy__Clusters__notification-cluster__Destinations__notification__Address
+              value: http://notification-service:8080/
+            - name: ReverseProxy__Clusters__chat-cluster__Destinations__chat__Address
+              value: http://chat-service:8080/
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: chat-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: bvilela/chat-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: identity-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: chat-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: message-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: message-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presence-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: presence-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: chat-platform
+spec:
+  selector:
+    app: notification-service
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: chat-platform
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: chat-platform
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend
+  namespace: chat-platform
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: chat.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
