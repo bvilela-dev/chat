@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: identity-service
+    static_configs:
+      - targets: ["identity-service:8080"]
+    metrics_path: /metrics
+  - job_name: chat-service
+    static_configs:
+      - targets: ["chat-service:8080"]
+    metrics_path: /metrics
+  - job_name: message-service
+    static_configs:
+      - targets: ["message-service:8080"]
+    metrics_path: /metrics
+  - job_name: presence-service
+    static_configs:
+      - targets: ["presence-service:8080"]
+    metrics_path: /metrics
+  - job_name: notification-service
+    static_configs:
+      - targets: ["notification-service:8080"]
+    metrics_path: /metrics
+  - job_name: api-gateway
+    static_configs:
+      - targets: ["api-gateway:8080"]
+    metrics_path: /metrics
