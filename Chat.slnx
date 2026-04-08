@@ -1,0 +1,71 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ApiGateway/ApiGateway.csproj" />
+  </Folder>
+  <Folder Name="/src/BuildingBlocks/" />
+  <Folder Name="/src/BuildingBlocks/Contracts/">
+    <Project Path="src/BuildingBlocks/Contracts/BuildingBlocks.Contracts.csproj" />
+  </Folder>
+  <Folder Name="/src/ChatService/" />
+  <Folder Name="/src/ChatService/API/">
+    <Project Path="src/ChatService/API/ChatService.API.csproj" />
+  </Folder>
+  <Folder Name="/src/ChatService/Application/">
+    <Project Path="src/ChatService/Application/ChatService.Application.csproj" />
+  </Folder>
+  <Folder Name="/src/ChatService/Domain/">
+    <Project Path="src/ChatService/Domain/ChatService.Domain.csproj" />
+  </Folder>
+  <Folder Name="/src/ChatService/Infrastructure/">
+    <Project Path="src/ChatService/Infrastructure/ChatService.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/src/IdentityService/" />
+  <Folder Name="/src/IdentityService/API/">
+    <Project Path="src/IdentityService/API/IdentityService.API.csproj" />
+  </Folder>
+  <Folder Name="/src/IdentityService/Application/">
+    <Project Path="src/IdentityService/Application/IdentityService.Application.csproj" />
+  </Folder>
+  <Folder Name="/src/IdentityService/Domain/">
+    <Project Path="src/IdentityService/Domain/IdentityService.Domain.csproj" />
+  </Folder>
+  <Folder Name="/src/IdentityService/Infrastructure/">
+    <Project Path="src/IdentityService/Infrastructure/IdentityService.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/src/MessageService/" />
+  <Folder Name="/src/MessageService/API/">
+    <Project Path="src/MessageService/API/MessageService.API.csproj" />
+  </Folder>
+  <Folder Name="/src/MessageService/Application/">
+    <Project Path="src/MessageService/Application/MessageService.Application.csproj" />
+  </Folder>
+  <Folder Name="/src/MessageService/Domain/">
+    <Project Path="src/MessageService/Domain/MessageService.Domain.csproj" />
+  </Folder>
+  <Folder Name="/src/MessageService/Infrastructure/">
+    <Project Path="src/MessageService/Infrastructure/MessageService.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/src/NotificationService/" />
+  <Folder Name="/src/NotificationService/API/">
+    <Project Path="src/NotificationService/API/NotificationService.API.csproj" />
+  </Folder>
+  <Folder Name="/src/NotificationService/Application/">
+    <Project Path="src/NotificationService/Application/NotificationService.Application.csproj" />
+  </Folder>
+  <Folder Name="/src/NotificationService/Infrastructure/">
+    <Project Path="src/NotificationService/Infrastructure/NotificationService.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/src/PresenceService/" />
+  <Folder Name="/src/PresenceService/API/">
+    <Project Path="src/PresenceService/API/PresenceService.API.csproj" />
+  </Folder>
+  <Folder Name="/src/PresenceService/Application/">
+    <Project Path="src/PresenceService/Application/PresenceService.Application.csproj" />
+  </Folder>
+  <Folder Name="/src/PresenceService/Domain/">
+    <Project Path="src/PresenceService/Domain/PresenceService.Domain.csproj" />
+  </Folder>
+  <Folder Name="/src/PresenceService/Infrastructure/">
+    <Project Path="src/PresenceService/Infrastructure/PresenceService.Infrastructure.csproj" />
+  </Folder>
+</Solution>

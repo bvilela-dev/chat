@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+option csharp_namespace = "BuildingBlocks.Contracts.Grpc";
+
+package identity;
+
+service UserValidationGrpc {
+  rpc ValidateUser (ValidateUserRequest) returns (ValidateUserResponse);
+}
+
+message ValidateUserRequest {
+  string userId = 1;
+}
+
+message ValidateUserResponse {
+  bool exists = 1;
+  string userId = 2;
+  string name = 3;
+  string email = 4;
+}
