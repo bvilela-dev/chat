@@ -9,15 +9,28 @@ HOST_NAME="chat.local"
 HOSTS_MARKER="# chat-platform-k3s"
 DEFAULT_KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
 
-IMAGES=(
-  "bvilela/chat-identity:latest|src/IdentityService/API/Dockerfile"
-  "bvilela/chat-write:latest|src/ChatService/API/Dockerfile"
-  "bvilela/chat-message:latest|src/MessageService/API/Dockerfile"
-  "bvilela/chat-presence:latest|src/PresenceService/API/Dockerfile"
-  "bvilela/chat-notification:latest|src/NotificationService/API/Dockerfile"
-  "bvilela/chat-gateway:latest|src/ApiGateway/Dockerfile"
-  "bvilela/chat-frontend:latest|frontend/Dockerfile"
+# Serviços .NET, todos construídos a partir do MESMO Dockerfile parametrizado
+# (src/Dockerfile). Antes havia um Dockerfile por serviço, seis arquivos quase
+# idênticos — e qualquer melhoria precisava ser replicada em todos eles.
+#
+# Formato: <imagem>|<caminho do .csproj>|<nome da DLL>
+DOTNET_IMAGES=(
+  "bvilela/chat-identity:latest|src/IdentityService/API/IdentityService.API.csproj|IdentityService.API.dll"
+  "bvilela/chat-write:latest|src/ChatService/API/ChatService.API.csproj|ChatService.API.dll"
+  "bvilela/chat-message:latest|src/MessageService/API/MessageService.API.csproj|MessageService.API.dll"
+  "bvilela/chat-presence:latest|src/PresenceService/API/PresenceService.API.csproj|PresenceService.API.dll"
+  "bvilela/chat-notification:latest|src/NotificationService/API/NotificationService.API.csproj|NotificationService.API.dll"
+  "bvilela/chat-gateway:latest|src/ApiGateway/ApiGateway.csproj|ApiGateway.dll"
 )
+
+FRONTEND_IMAGE="bvilela/chat-frontend:latest"
+
+# Nomes de todas as imagens, usados na importação para o containerd do k3s.
+ALL_IMAGE_NAMES=()
+for item in "${DOTNET_IMAGES[@]}"; do
+  ALL_IMAGE_NAMES+=("${item%%|*}")
+done
+ALL_IMAGE_NAMES+=("$FRONTEND_IMAGE")
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -27,26 +40,30 @@ require_command() {
 }
 
 build_images() {
-  local item image dockerfile
+  local item image project dll
 
-  for item in "${IMAGES[@]}"; do
-    IFS='|' read -r image dockerfile <<< "$item"
+  for item in "${DOTNET_IMAGES[@]}"; do
+    IFS='|' read -r image project dll <<< "$item"
     echo "[build] $image"
-    docker build -t "$image" -f "$ROOT_DIR/$dockerfile" "$ROOT_DIR"
+    docker build \
+      --tag "$image" \
+      --file "$ROOT_DIR/src/Dockerfile" \
+      --build-arg "SERVICE_PATH=$project" \
+      --build-arg "SERVICE_DLL=$dll" \
+      "$ROOT_DIR"
   done
+
+  echo "[build] $FRONTEND_IMAGE"
+  docker build --tag "$FRONTEND_IMAGE" --file "$ROOT_DIR/frontend/Dockerfile" "$ROOT_DIR"
 }
 
 import_images_into_k3s() {
-  local image_names=()
-  local item image dockerfile
-
-  for item in "${IMAGES[@]}"; do
-    IFS='|' read -r image dockerfile <<< "$item"
-    image_names+=("$image")
-  done
-
-  echo "[import] Importing Docker images into k3s containerd"
-  docker save "${image_names[@]}" | sudo k3s ctr images import -
+  # O k3s usa containerd, que tem seu próprio armazenamento de imagens — separado
+  # do daemon do Docker. Sem esta importação, os pods tentariam baixar as imagens
+  # de um registro remoto e ficariam em ImagePullBackOff, já que elas só existem
+  # localmente.
+  echo "[import] Importando imagens Docker no containerd do k3s"
+  docker save "${ALL_IMAGE_NAMES[@]}" | sudo k3s ctr images import -
 }
 
 wait_for_rollouts() {
@@ -137,10 +154,17 @@ main() {
   ensure_hosts_entry
 
   echo
-  echo "Application is ready."
-  echo "Frontend: http://$HOST_NAME"
-  echo "API Gateway: kubectl port-forward svc/api-gateway 8080:8080 -n $NAMESPACE"
-  echo "RabbitMQ UI: kubectl port-forward svc/rabbitmq 15672:15672 -n $NAMESPACE"
+  echo "Aplicação pronta."
+  echo
+  echo "  Frontend        http://$HOST_NAME"
+  echo
+  echo "Para acessar as APIs internas, use port-forward:"
+  echo "  API Gateway     kubectl port-forward svc/api-gateway 8080:8080 -n $NAMESPACE"
+  echo "  RabbitMQ UI     kubectl port-forward svc/rabbitmq 15672:15672 -n $NAMESPACE"
+  echo
+  echo "Diagnóstico:"
+  echo "  kubectl get pods -n $NAMESPACE"
+  echo "  kubectl logs -f deployment/chat-service -n $NAMESPACE"
 }
 
 main "$@"

@@ -2,10 +2,14 @@
   "name": "chat-frontend",
   "version": "1.0.0",
   "private": true,
+  "description": "Frontend Angular da plataforma de chat distribuída.",
   "scripts": {
     "start": "ng serve --host 0.0.0.0 --port 4200",
-    "build": "ng build",
-    "test": "ng test"
+    "build": "ng build --configuration production",
+    "build:dev": "ng build --configuration development",
+    "test": "ng test --watch=false --browsers=ChromeHeadless",
+    "test:watch": "ng test",
+    "lint:types": "tsc --noEmit -p tsconfig.app.json"
   },
   "dependencies": {
     "@angular/animations": "19.2.0",
@@ -25,6 +29,13 @@
     "@angular-devkit/build-angular": "19.2.0",
     "@angular/cli": "19.2.0",
     "@angular/compiler-cli": "19.2.0",
+    "@types/jasmine": "5.1.7",
+    "jasmine-core": "5.6.0",
+    "karma": "6.4.4",
+    "karma-chrome-launcher": "3.2.0",
+    "karma-coverage": "2.2.1",
+    "karma-jasmine": "5.1.0",
+    "karma-jasmine-html-reporter": "2.1.0",
     "typescript": "5.8.2"
   }
 }

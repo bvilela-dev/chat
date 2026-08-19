@@ -10,7 +10,22 @@ metadata:
   namespace: chat-platform
 type: Opaque
 stringData:
-  JWT_KEY: super-secret-development-key-change-me
+  # ATENÇÃO — SEGREDOS DE DEMONSTRAÇÃO.
+  #
+  # Estes valores existem para que `./start.sh` funcione num cluster local sem
+  # configuração adicional. NUNCA use este manifesto como está em produção.
+  #
+  # Em produção, segredos não moram num arquivo versionado. As opções corretas
+  # são: External Secrets Operator lendo de um cofre (Vault, AWS Secrets Manager,
+  # Azure Key Vault), Sealed Secrets, ou a injeção por CSI driver.
+  #
+  # Gere uma chave adequada com:
+  #   openssl rand -base64 48
+  #
+  # Nota: os serviços RECUSAM iniciar se esta chave for a chave de exemplo do
+  # repositório (`super-secret-development-key-change-me`) fora do ambiente de
+  # desenvolvimento — ver JwtAuthenticationExtensions.GuardAgainstInsecureConfiguration.
+  JWT_KEY: k3s-local-demo-key-troque-antes-de-qualquer-deploy-real-0001
   POSTGRES_PASSWORD: postgres
   RABBITMQ_USERNAME: guest
   RABBITMQ_PASSWORD: guest
@@ -26,6 +41,15 @@ data:
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
   REDIS_CONNECTION: redis:6379
   RABBITMQ_HOST: rabbitmq
+
+  # Endereço do serviço gRPC que responde às consultas de participação em
+  # conversa. É a dependência que sustenta a autorização em tempo real do chat.
+  GRPC_MESSAGE_SERVICE: http://message-service:8081
+
+  # Origens autorizadas pelo CORS no gateway. Fora de Development, a ausência
+  # desta configuração faz o gateway FALHAR AO INICIAR — falhar fechado é a
+  # postura correta para uma política de segurança.
+  CORS_ALLOWED_ORIGINS: http://chat.local
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -359,7 +383,14 @@ spec:
           image: bvilela/chat-identity:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            # REST/HTTP1, consumido pelo gateway e pelas probes.
+            - name: http
+              containerPort: 8080
+            # gRPC/HTTP2. Porta separada porque o Kestrel não serve HTTP/1.1 e
+            # HTTP/2 na mesma porta sem TLS — ver GrpcHostingExtensions.
+            # Não é exposta pelo Ingress: só é alcançável dentro do cluster.
+            - name: grpc
+              containerPort: 8081
           env:
             - name: POSTGRES_PASSWORD
               valueFrom:
@@ -403,6 +434,99 @@ spec:
                 configMapKeyRef:
                   name: chat-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+          # -------------------------------------------------------------------
+          # PROBES
+          #
+          # Kubernetes distingue três perguntas, e responder as três é o que
+          # permite deploys sem indisponibilidade:
+          #
+          #   startup   → "já terminou de iniciar?" Enquanto falha, as outras
+          #               duas ficam suspensas. É o que dá tempo às migrations
+          #               sem que o pod seja morto por demorar a subir.
+          #   readiness → "pode receber tráfego AGORA?" Ao falhar, o pod sai do
+          #               balanceador mas NÃO é reiniciado.
+          #   liveness  → "o processo travou?" Ao falhar, o pod é REINICIADO.
+          #
+          # Confundir readiness com liveness é o erro clássico: um serviço que
+          # perde o banco momentaneamente seria reiniciado em laço, quando o
+          # correto é apenas parar de receber tráfego até o banco voltar.
+          # -------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # 30 x 5s = até 2min30 para iniciar (cobre migrations em banco frio).
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Tolerância maior que a readiness: reiniciar é uma ação destrutiva
+            # (derruba conexões WebSocket abertas) e não deve ser disparada por
+            # uma oscilação passageira.
+            failureThreshold: 5
+          # -------------------------------------------------------------------
+          # RECURSOS
+          #
+          # `requests` é o que o escalonador reserva; `limits` é o teto.
+          #
+          # Sem `requests`, o pod entra na classe BestEffort e é o PRIMEIRO a ser
+          # despejado quando o nó fica sob pressão de memória. Sem `limits`, um
+          # vazamento de memória num serviço consome o nó inteiro e derruba os
+          # vizinhos.
+          #
+          # Nota sobre limite de CPU: ao contrário da memória, ele causa
+          # THROTTLING, não término do processo. Um limite apertado demais
+          # aumenta a latência de cauda de forma difícil de diagnosticar — por
+          # isso a folga entre request e limit aqui é generosa.
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # -------------------------------------------------------------------
+          # CONTEXTO DE SEGURANÇA
+          #
+          # Reduz o que um atacante consegue fazer caso obtenha execução de
+          # código dentro do contêiner. É também o exigido pelo
+          # PodSecurityStandard "restricted".
+          # -------------------------------------------------------------------
+          securityContext:
+            # Impede que o processo ganhe privilégios além dos do usuário que o
+            # iniciou (bloqueia binários setuid).
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            # UID do usuário `app`, já presente nas imagens oficiais do .NET.
+            runAsUser: 1654
+            capabilities:
+              drop: ["ALL"]
+            # Sistema de arquivos somente leitura: um atacante não consegue
+            # gravar um webshell nem baixar ferramentas.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # O .NET precisa de um diretório temporário gravável (por exemplo,
+            # para a chave de proteção de dados). Um emptyDir em memória atende
+            # sem abrir a raiz para escrita.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -463,11 +587,114 @@ spec:
                   key: JWT_KEY
             - name: Grpc__Identity
               value: http://identity-service:8080
+            # Endereço do serviço gRPC que responde às consultas de participação
+            # em conversa. É a dependência que sustenta a autorização em tempo
+            # real: sem ela, a política falha FECHADA e ninguém entra em conversa
+            # alguma (o que é o comportamento correto — melhor indisponível que
+            # inseguro).
+            - name: Grpc__MessageService
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: GRPC_MESSAGE_SERVICE
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               valueFrom:
                 configMapKeyRef:
                   name: chat-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+          # -------------------------------------------------------------------
+          # PROBES
+          #
+          # Kubernetes distingue três perguntas, e responder as três é o que
+          # permite deploys sem indisponibilidade:
+          #
+          #   startup   → "já terminou de iniciar?" Enquanto falha, as outras
+          #               duas ficam suspensas. É o que dá tempo às migrations
+          #               sem que o pod seja morto por demorar a subir.
+          #   readiness → "pode receber tráfego AGORA?" Ao falhar, o pod sai do
+          #               balanceador mas NÃO é reiniciado.
+          #   liveness  → "o processo travou?" Ao falhar, o pod é REINICIADO.
+          #
+          # Confundir readiness com liveness é o erro clássico: um serviço que
+          # perde o banco momentaneamente seria reiniciado em laço, quando o
+          # correto é apenas parar de receber tráfego até o banco voltar.
+          # -------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # 30 x 5s = até 2min30 para iniciar (cobre migrations em banco frio).
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Tolerância maior que a readiness: reiniciar é uma ação destrutiva
+            # (derruba conexões WebSocket abertas) e não deve ser disparada por
+            # uma oscilação passageira.
+            failureThreshold: 5
+          # -------------------------------------------------------------------
+          # RECURSOS
+          #
+          # `requests` é o que o escalonador reserva; `limits` é o teto.
+          #
+          # Sem `requests`, o pod entra na classe BestEffort e é o PRIMEIRO a ser
+          # despejado quando o nó fica sob pressão de memória. Sem `limits`, um
+          # vazamento de memória num serviço consome o nó inteiro e derruba os
+          # vizinhos.
+          #
+          # Nota sobre limite de CPU: ao contrário da memória, ele causa
+          # THROTTLING, não término do processo. Um limite apertado demais
+          # aumenta a latência de cauda de forma difícil de diagnosticar — por
+          # isso a folga entre request e limit aqui é generosa.
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # -------------------------------------------------------------------
+          # CONTEXTO DE SEGURANÇA
+          #
+          # Reduz o que um atacante consegue fazer caso obtenha execução de
+          # código dentro do contêiner. É também o exigido pelo
+          # PodSecurityStandard "restricted".
+          # -------------------------------------------------------------------
+          securityContext:
+            # Impede que o processo ganhe privilégios além dos do usuário que o
+            # iniciou (bloqueia binários setuid).
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            # UID do usuário `app`, já presente nas imagens oficiais do .NET.
+            runAsUser: 1654
+            capabilities:
+              drop: ["ALL"]
+            # Sistema de arquivos somente leitura: um atacante não consegue
+            # gravar um webshell nem baixar ferramentas.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # O .NET precisa de um diretório temporário gravável (por exemplo,
+            # para a chave de proteção de dados). Um emptyDir em memória atende
+            # sem abrir a raiz para escrita.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -489,7 +716,14 @@ spec:
           image: bvilela/chat-message:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            # REST/HTTP1, consumido pelo gateway e pelas probes.
+            - name: http
+              containerPort: 8080
+            # gRPC/HTTP2. Porta separada porque o Kestrel não serve HTTP/1.1 e
+            # HTTP/2 na mesma porta sem TLS — ver GrpcHostingExtensions.
+            # Não é exposta pelo Ingress: só é alcançável dentro do cluster.
+            - name: grpc
+              containerPort: 8081
           env:
             - name: POSTGRES_PASSWORD
               valueFrom:
@@ -533,6 +767,99 @@ spec:
                 configMapKeyRef:
                   name: chat-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+          # -------------------------------------------------------------------
+          # PROBES
+          #
+          # Kubernetes distingue três perguntas, e responder as três é o que
+          # permite deploys sem indisponibilidade:
+          #
+          #   startup   → "já terminou de iniciar?" Enquanto falha, as outras
+          #               duas ficam suspensas. É o que dá tempo às migrations
+          #               sem que o pod seja morto por demorar a subir.
+          #   readiness → "pode receber tráfego AGORA?" Ao falhar, o pod sai do
+          #               balanceador mas NÃO é reiniciado.
+          #   liveness  → "o processo travou?" Ao falhar, o pod é REINICIADO.
+          #
+          # Confundir readiness com liveness é o erro clássico: um serviço que
+          # perde o banco momentaneamente seria reiniciado em laço, quando o
+          # correto é apenas parar de receber tráfego até o banco voltar.
+          # -------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # 30 x 5s = até 2min30 para iniciar (cobre migrations em banco frio).
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Tolerância maior que a readiness: reiniciar é uma ação destrutiva
+            # (derruba conexões WebSocket abertas) e não deve ser disparada por
+            # uma oscilação passageira.
+            failureThreshold: 5
+          # -------------------------------------------------------------------
+          # RECURSOS
+          #
+          # `requests` é o que o escalonador reserva; `limits` é o teto.
+          #
+          # Sem `requests`, o pod entra na classe BestEffort e é o PRIMEIRO a ser
+          # despejado quando o nó fica sob pressão de memória. Sem `limits`, um
+          # vazamento de memória num serviço consome o nó inteiro e derruba os
+          # vizinhos.
+          #
+          # Nota sobre limite de CPU: ao contrário da memória, ele causa
+          # THROTTLING, não término do processo. Um limite apertado demais
+          # aumenta a latência de cauda de forma difícil de diagnosticar — por
+          # isso a folga entre request e limit aqui é generosa.
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # -------------------------------------------------------------------
+          # CONTEXTO DE SEGURANÇA
+          #
+          # Reduz o que um atacante consegue fazer caso obtenha execução de
+          # código dentro do contêiner. É também o exigido pelo
+          # PodSecurityStandard "restricted".
+          # -------------------------------------------------------------------
+          securityContext:
+            # Impede que o processo ganhe privilégios além dos do usuário que o
+            # iniciou (bloqueia binários setuid).
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            # UID do usuário `app`, já presente nas imagens oficiais do .NET.
+            runAsUser: 1654
+            capabilities:
+              drop: ["ALL"]
+            # Sistema de arquivos somente leitura: um atacante não consegue
+            # gravar um webshell nem baixar ferramentas.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # O .NET precisa de um diretório temporário gravável (por exemplo,
+            # para a chave de proteção de dados). Um emptyDir em memória atende
+            # sem abrir a raiz para escrita.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -596,6 +923,99 @@ spec:
                 configMapKeyRef:
                   name: chat-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+          # -------------------------------------------------------------------
+          # PROBES
+          #
+          # Kubernetes distingue três perguntas, e responder as três é o que
+          # permite deploys sem indisponibilidade:
+          #
+          #   startup   → "já terminou de iniciar?" Enquanto falha, as outras
+          #               duas ficam suspensas. É o que dá tempo às migrations
+          #               sem que o pod seja morto por demorar a subir.
+          #   readiness → "pode receber tráfego AGORA?" Ao falhar, o pod sai do
+          #               balanceador mas NÃO é reiniciado.
+          #   liveness  → "o processo travou?" Ao falhar, o pod é REINICIADO.
+          #
+          # Confundir readiness com liveness é o erro clássico: um serviço que
+          # perde o banco momentaneamente seria reiniciado em laço, quando o
+          # correto é apenas parar de receber tráfego até o banco voltar.
+          # -------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # 30 x 5s = até 2min30 para iniciar (cobre migrations em banco frio).
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Tolerância maior que a readiness: reiniciar é uma ação destrutiva
+            # (derruba conexões WebSocket abertas) e não deve ser disparada por
+            # uma oscilação passageira.
+            failureThreshold: 5
+          # -------------------------------------------------------------------
+          # RECURSOS
+          #
+          # `requests` é o que o escalonador reserva; `limits` é o teto.
+          #
+          # Sem `requests`, o pod entra na classe BestEffort e é o PRIMEIRO a ser
+          # despejado quando o nó fica sob pressão de memória. Sem `limits`, um
+          # vazamento de memória num serviço consome o nó inteiro e derruba os
+          # vizinhos.
+          #
+          # Nota sobre limite de CPU: ao contrário da memória, ele causa
+          # THROTTLING, não término do processo. Um limite apertado demais
+          # aumenta a latência de cauda de forma difícil de diagnosticar — por
+          # isso a folga entre request e limit aqui é generosa.
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # -------------------------------------------------------------------
+          # CONTEXTO DE SEGURANÇA
+          #
+          # Reduz o que um atacante consegue fazer caso obtenha execução de
+          # código dentro do contêiner. É também o exigido pelo
+          # PodSecurityStandard "restricted".
+          # -------------------------------------------------------------------
+          securityContext:
+            # Impede que o processo ganhe privilégios além dos do usuário que o
+            # iniciou (bloqueia binários setuid).
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            # UID do usuário `app`, já presente nas imagens oficiais do .NET.
+            runAsUser: 1654
+            capabilities:
+              drop: ["ALL"]
+            # Sistema de arquivos somente leitura: um atacante não consegue
+            # gravar um webshell nem baixar ferramentas.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # O .NET precisa de um diretório temporário gravável (por exemplo,
+            # para a chave de proteção de dados). Um emptyDir em memória atende
+            # sem abrir a raiz para escrita.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -644,6 +1064,99 @@ spec:
                 configMapKeyRef:
                   name: chat-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+          # -------------------------------------------------------------------
+          # PROBES
+          #
+          # Kubernetes distingue três perguntas, e responder as três é o que
+          # permite deploys sem indisponibilidade:
+          #
+          #   startup   → "já terminou de iniciar?" Enquanto falha, as outras
+          #               duas ficam suspensas. É o que dá tempo às migrations
+          #               sem que o pod seja morto por demorar a subir.
+          #   readiness → "pode receber tráfego AGORA?" Ao falhar, o pod sai do
+          #               balanceador mas NÃO é reiniciado.
+          #   liveness  → "o processo travou?" Ao falhar, o pod é REINICIADO.
+          #
+          # Confundir readiness com liveness é o erro clássico: um serviço que
+          # perde o banco momentaneamente seria reiniciado em laço, quando o
+          # correto é apenas parar de receber tráfego até o banco voltar.
+          # -------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # 30 x 5s = até 2min30 para iniciar (cobre migrations em banco frio).
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Tolerância maior que a readiness: reiniciar é uma ação destrutiva
+            # (derruba conexões WebSocket abertas) e não deve ser disparada por
+            # uma oscilação passageira.
+            failureThreshold: 5
+          # -------------------------------------------------------------------
+          # RECURSOS
+          #
+          # `requests` é o que o escalonador reserva; `limits` é o teto.
+          #
+          # Sem `requests`, o pod entra na classe BestEffort e é o PRIMEIRO a ser
+          # despejado quando o nó fica sob pressão de memória. Sem `limits`, um
+          # vazamento de memória num serviço consome o nó inteiro e derruba os
+          # vizinhos.
+          #
+          # Nota sobre limite de CPU: ao contrário da memória, ele causa
+          # THROTTLING, não término do processo. Um limite apertado demais
+          # aumenta a latência de cauda de forma difícil de diagnosticar — por
+          # isso a folga entre request e limit aqui é generosa.
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # -------------------------------------------------------------------
+          # CONTEXTO DE SEGURANÇA
+          #
+          # Reduz o que um atacante consegue fazer caso obtenha execução de
+          # código dentro do contêiner. É também o exigido pelo
+          # PodSecurityStandard "restricted".
+          # -------------------------------------------------------------------
+          securityContext:
+            # Impede que o processo ganhe privilégios além dos do usuário que o
+            # iniciou (bloqueia binários setuid).
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            # UID do usuário `app`, já presente nas imagens oficiais do .NET.
+            runAsUser: 1654
+            capabilities:
+              drop: ["ALL"]
+            # Sistema de arquivos somente leitura: um atacante não consegue
+            # gravar um webshell nem baixar ferramentas.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # O .NET precisa de um diretório temporário gravável (por exemplo,
+            # para a chave de proteção de dados). Um emptyDir em memória atende
+            # sem abrir a raiz para escrita.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -692,11 +1205,112 @@ spec:
               value: http://notification-service:8080/
             - name: ReverseProxy__Clusters__chat-cluster__Destinations__chat__Address
               value: http://chat-service:8080/
+            # Origens autorizadas pelo CORS. Fora de Development, a ausência
+            # desta configuração faz o gateway FALHAR AO INICIAR — falhar fechado
+            # é a postura correta para uma política de segurança.
+            - name: Cors__AllowedOrigins
+              valueFrom:
+                configMapKeyRef:
+                  name: chat-config
+                  key: CORS_ALLOWED_ORIGINS
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               valueFrom:
                 configMapKeyRef:
                   name: chat-config
                   key: OTEL_EXPORTER_OTLP_ENDPOINT
+          # -------------------------------------------------------------------
+          # PROBES
+          #
+          # Kubernetes distingue três perguntas, e responder as três é o que
+          # permite deploys sem indisponibilidade:
+          #
+          #   startup   → "já terminou de iniciar?" Enquanto falha, as outras
+          #               duas ficam suspensas. É o que dá tempo às migrations
+          #               sem que o pod seja morto por demorar a subir.
+          #   readiness → "pode receber tráfego AGORA?" Ao falhar, o pod sai do
+          #               balanceador mas NÃO é reiniciado.
+          #   liveness  → "o processo travou?" Ao falhar, o pod é REINICIADO.
+          #
+          # Confundir readiness com liveness é o erro clássico: um serviço que
+          # perde o banco momentaneamente seria reiniciado em laço, quando o
+          # correto é apenas parar de receber tráfego até o banco voltar.
+          # -------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            # 30 x 5s = até 2min30 para iniciar (cobre migrations em banco frio).
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Tolerância maior que a readiness: reiniciar é uma ação destrutiva
+            # (derruba conexões WebSocket abertas) e não deve ser disparada por
+            # uma oscilação passageira.
+            failureThreshold: 5
+          # -------------------------------------------------------------------
+          # RECURSOS
+          #
+          # `requests` é o que o escalonador reserva; `limits` é o teto.
+          #
+          # Sem `requests`, o pod entra na classe BestEffort e é o PRIMEIRO a ser
+          # despejado quando o nó fica sob pressão de memória. Sem `limits`, um
+          # vazamento de memória num serviço consome o nó inteiro e derruba os
+          # vizinhos.
+          #
+          # Nota sobre limite de CPU: ao contrário da memória, ele causa
+          # THROTTLING, não término do processo. Um limite apertado demais
+          # aumenta a latência de cauda de forma difícil de diagnosticar — por
+          # isso a folga entre request e limit aqui é generosa.
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # -------------------------------------------------------------------
+          # CONTEXTO DE SEGURANÇA
+          #
+          # Reduz o que um atacante consegue fazer caso obtenha execução de
+          # código dentro do contêiner. É também o exigido pelo
+          # PodSecurityStandard "restricted".
+          # -------------------------------------------------------------------
+          securityContext:
+            # Impede que o processo ganhe privilégios além dos do usuário que o
+            # iniciou (bloqueia binários setuid).
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            # UID do usuário `app`, já presente nas imagens oficiais do .NET.
+            runAsUser: 1654
+            capabilities:
+              drop: ["ALL"]
+            # Sistema de arquivos somente leitura: um atacante não consegue
+            # gravar um webshell nem baixar ferramentas.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # O .NET precisa de um diretório temporário gravável (por exemplo,
+            # para a chave de proteção de dados). Um emptyDir em memória atende
+            # sem abrir a raiz para escrita.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -729,8 +1343,12 @@ spec:
   selector:
     app: identity-service
   ports:
-    - port: 8080
+    - name: http
+      port: 8080
       targetPort: 8080
+    - name: grpc
+      port: 8081
+      targetPort: 8081
 ---
 apiVersion: v1
 kind: Service
@@ -753,8 +1371,12 @@ spec:
   selector:
     app: message-service
   ports:
-    - port: 8080
+    - name: http
+      port: 8080
       targetPort: 8080
+    - name: grpc
+      port: 8081
+      targetPort: 8081
 ---
 apiVersion: v1
 kind: Service

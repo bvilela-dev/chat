@@ -1,60 +1,50 @@
-using System.Text;
-using FluentValidation;
-using MediatR;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
+using BuildingBlocks.Application;
+using BuildingBlocks.AspNetCore;
 using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
-using PresenceService.API.Middleware;
-using PresenceService.Application;
+using PresenceService.Application.Presence;
 using PresenceService.Infrastructure;
+using PresenceService.Infrastructure.Telemetry;
+
+// =============================================================================
+// PRESENCE SERVICE — quem está online agora.
+//
+// Todo o estado vive em Redis com expiração automática: presença é dado
+// efêmero, de alta rotatividade, cuja perda total num incidente é irrelevante.
+// Publica eventos de entrada e saída para que outros serviços reajam — o
+// Notification Service, por exemplo, só notifica quem está offline.
+// =============================================================================
 
 var builder = WebApplication.CreateBuilder(args);
-var jwtKey = builder.Configuration["Jwt:Key"] ?? "super-secret-development-key-change-me";
+
+builder.Services.AddApplicationBuildingBlocks(typeof(SetUserOnlineCommand).Assembly);
+builder.Services.AddPresenceInfrastructure(builder.Configuration);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
-builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(SetUserOnlineCommand).Assembly));
-builder.Services.AddValidatorsFromAssembly(typeof(SetUserOnlineCommand).Assembly);
-builder.Services.AddPresenceInfrastructure(builder.Configuration);
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
-    {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"] ?? "chat-identity",
-            ValidAudience = builder.Configuration["Jwt:Audience"] ?? "chat-clients",
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
-        };
-    });
-builder.Services.AddAuthorization();
+
+builder.AddChatJwtAuthentication();
+builder.AddChatObservability(serviceName: "presence-service", PresenceTelemetry.MeterName);
+builder.AddChatForwardedHeaders();
 builder.Services.AddHealthChecks();
-builder.Services.AddOpenTelemetry()
-    .ConfigureResource(resource => resource.AddService("presence-service"))
-    .WithTracing(tracing => tracing
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddOtlpExporter())
-    .WithMetrics(metrics => metrics
-        .AddAspNetCoreInstrumentation()
-        .AddRuntimeInstrumentation()
-        .AddMeter("PresenceService")
-        .AddPrometheusExporter()
-        .AddOtlpExporter());
 
 var app = builder.Build();
 
-app.UseMiddleware<PresenceExceptionMiddleware>();
+app.UseChatExceptionHandling();
+app.UseChatForwardedHeaders();
 app.UseAuthentication();
 app.UseAuthorization();
+
 app.MapControllers();
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
-app.MapOpenApi();
-app.Run();
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
+
+await app.RunAsync();
+
+/// <summary>Ponto de entrada, exposto para os testes de integração.</summary>
+public partial class Program;

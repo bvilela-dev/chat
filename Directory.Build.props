@@ -1,9 +1,103 @@
 <Project>
+
+  <!--
+    Propriedades aplicadas a TODOS os projetos da solução. O MSBuild importa este
+    arquivo automaticamente ao subir a árvore de diretórios a partir de cada
+    .csproj, o que evita repetir a mesma configuração 24 vezes.
+  -->
+
   <PropertyGroup>
-    <LangVersion>13.0</LangVersion>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+
+    <!--
+      Tipos de referência anuláveis. Faz o compilador rastrear onde null é
+      possível e avisar quando ele não é tratado.
+
+      É provavelmente o recurso de C# com melhor relação entre esforço e defeitos
+      evitados: transforma NullReferenceException — o erro de runtime mais comum
+      da plataforma — em aviso de compilação.
+    -->
     <Nullable>enable</Nullable>
+
+    <!-- Dispensa os `using System;` repetidos no topo de cada arquivo. -->
     <ImplicitUsings>enable</ImplicitUsings>
-    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-    <NoWarn>$(NoWarn);1591</NoWarn>
+
+    <!--
+      AVISOS SÃO ERROS.
+      A configuração anterior era `false`, o que na prática significa que avisos
+      são ignorados: numa base ativa eles se acumulam às centenas e param de ser
+      lidos. Entre esses avisos ignorados estão coisas como "resultado de
+      operação assíncrona descartado" (CS4014) — que é um bug de verdade.
+
+      Tratar aviso como erro força a decisão no momento em que ele aparece:
+      corrigir, ou suprimir de forma explícita e justificada.
+    -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!--
+      EXCEÇÕES CONSCIENTES.
+      Cada supressão abaixo é uma decisão justificada, não uma desistência.
+
+      CS1591 - Membro público sem comentário XML.
+               A documentação neste projeto é extensa e deliberada, mas exigi-la
+               em CADA membro produziria ruído do tipo
+               "/// <summary>Obtém o Id.</summary>", que não informa nada.
+
+      CA1848 - "Use LoggerMessage delegates em vez de LogInformation/LogError."
+               A recomendação é correta, e o ganho é real: os delegates gerados
+               por source generator evitam boxing dos argumentos e a análise do
+               template a cada chamada.
+               O ganho, porém, importa em log de ALTA FREQUÊNCIA. Aqui os pontos
+               de log são caminhos de erro e ciclos de background com intervalo de
+               segundos — o custo é irrelevante perto da chamada de rede ou de
+               banco que os acompanha. Adotar o padrão em todos eles trocaria
+               legibilidade por uma otimização não mensurável.
+               Se algum log entrar no caminho quente, a decisão deve ser revista
+               naquele ponto especificamente.
+
+      CA1873 - "A avaliação do argumento pode ser cara se o log estiver desativado."
+               Mesma justificativa: os argumentos aqui são GUIDs e strings já
+               materializadas, sem custo de avaliação.
+
+      CA1861 - "Prefira campos static readonly a arrays constantes como argumento."
+               Dispara apenas dentro das migrations GERADAS pelo EF Core, que não
+               editamos à mão — reescrevê-las seria perdido na próxima geração.
+    -->
+    <NoWarn>$(NoWarn);CS1591;CA1848;CA1873;CA1861</NoWarn>
+
+    <!--
+      Análise de código do .NET no nível recomendado: pega uso incorreto de
+      async, comparações de string dependentes de cultura, IDisposable não
+      liberado e outros padrões problemáticos.
+    -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+
+    <!--
+      Build determinístico: a mesma entrada produz sempre o mesmo binário, byte a
+      byte. É pré-requisito para cache confiável de CI e para verificação de
+      procedência do artefato.
+    -->
+    <Deterministic>true</Deterministic>
+
+    <!-- Metadados comuns. -->
+    <Authors>Bruno Vilela</Authors>
+    <Product>Distributed Chat Platform</Product>
   </PropertyGroup>
+
+  <!--
+    Projetos de teste: mesmo padrão de qualidade, com duas concessões.
+  -->
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('Tests'))">
+    <IsPackable>false</IsPackable>
+
+    <!--
+      CS1591 já está desativado acima; aqui liberamos também os avisos de
+      análise que só fazem sentido em código de produção — testes legitimamente
+      usam nomes longos e descritivos e constroem objetos "descartáveis".
+    -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1861</NoWarn>
+  </PropertyGroup>
+
 </Project>

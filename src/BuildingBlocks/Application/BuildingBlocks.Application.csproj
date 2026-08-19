@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Bloco de construção da camada de APLICAÇÃO, compartilhado por todos os
+    microsserviços. Contém apenas abstrações e comportamentos transversais
+    (cross-cutting concerns) que independem de banco, HTTP ou broker.
+
+    Regra de dependência: este projeto NÃO referencia Infrastructure nem API de
+    nenhum serviço. Ele só pode ser referenciado, nunca referenciar de volta.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
+    <PackageReference Include="MediatR" />
+  </ItemGroup>
+
+</Project>

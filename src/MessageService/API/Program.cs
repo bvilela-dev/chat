@@ -1,70 +1,78 @@
-using System.Text;
-using AutoMapper;
-using FluentValidation;
-using MediatR;
-using MessageService.API.Middleware;
-using MessageService.Application;
+using BuildingBlocks.Application;
+using BuildingBlocks.AspNetCore;
+using MessageService.API.Grpc;
+using MessageService.Application.Messages;
 using MessageService.Infrastructure;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+using MessageService.Infrastructure.Persistence;
+using MessageService.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
 using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
+
+// =============================================================================
+// MESSAGE SERVICE — persistência, histórico e autorização de conversas.
+//
+// É o lado "durável" do chat. Enquanto o Chat Service entrega mensagens em tempo
+// real (rápido e volátil), este serviço as grava, mantém as projeções de leitura
+// e é a fonte de verdade sobre quem participa de qual conversa.
+//
+// Expõe três superfícies distintas:
+//   - REST  → consumida pelo frontend (histórico e lista de conversas)
+//   - gRPC  → consumida pelo Chat Service (checagem de participação)
+//   - AMQP  → consumidores de eventos do RabbitMQ (persistência e projeções)
+// =============================================================================
 
 var builder = WebApplication.CreateBuilder(args);
-var jwtKey = builder.Configuration["Jwt:Key"] ?? "super-secret-development-key-change-me";
+
+builder.Services.AddApplicationBuildingBlocks(typeof(GetMessagesByConversationQuery).Assembly);
+builder.Services.AddMessageInfrastructure(builder.Configuration);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
-builder.Services.AddSingleton<IMapper>(_ => new MapperConfiguration(configuration => configuration.AddMaps(typeof(MessageMappingProfile).Assembly)).CreateMapper());
-builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(GetMessagesByConversationQuery).Assembly));
-builder.Services.AddValidatorsFromAssembly(typeof(GetMessagesByConversationQuery).Assembly);
-builder.Services.AddMessageInfrastructure(builder.Configuration);
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
-    {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"] ?? "chat-identity",
-            ValidAudience = builder.Configuration["Jwt:Audience"] ?? "chat-clients",
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
-        };
-    });
-builder.Services.AddAuthorization();
-builder.Services.AddHealthChecks();
-builder.Services.AddOpenTelemetry()
-    .ConfigureResource(resource => resource.AddService("message-service"))
-    .WithTracing(tracing => tracing
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddSource("MassTransit")
-        .AddOtlpExporter())
-    .WithMetrics(metrics => metrics
-        .AddAspNetCoreInstrumentation()
-        .AddRuntimeInstrumentation()
-        .AddMeter("MessageService")
-        .AddPrometheusExporter()
-        .AddOtlpExporter());
+// Kestrel precisa aceitar HTTP/1.1 (REST) e HTTP/2 (gRPC) na mesma porta.
+// Sem isto, o Chat Service não consegue consultar a participação em conversas
+// e a política de acesso — que falha fechada — nega TODOS os acessos,
+// inclusive os legítimos.
+builder.AddChatGrpcAndRestHosting(
+    // Portas configuráveis para que os serviços possam rodar lado a lado na mesma
+    // máquina, fora de contêineres, sem colidir. Nos contêineres cada serviço tem
+    // o próprio espaço de portas e os padrões bastam.
+    restPort: builder.Configuration.GetValue("Ports:Rest", GrpcHostingExtensions.DefaultRestPort),
+    grpcPort: builder.Configuration.GetValue("Ports:Grpc", GrpcHostingExtensions.DefaultGrpcPort));
+
+builder.Services.AddGrpc();
+
+builder.AddChatJwtAuthentication();
+builder.AddChatObservability(serviceName: "message-service", MessageTelemetry.MeterName);
+
+builder.AddChatForwardedHeaders();
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<MessageDbContext>(name: "message-database");
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
+await using (var scope = app.Services.CreateAsyncScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
     await dbContext.Database.MigrateAsync();
 }
 
-app.UseMiddleware<MessageExceptionMiddleware>();
+app.UseChatExceptionHandling();
+app.UseChatForwardedHeaders();
 app.UseAuthentication();
 app.UseAuthorization();
+
 app.MapControllers();
+app.MapGrpcService<ConversationAccessGrpcService>();
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
-app.MapOpenApi();
-app.Run();
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
+
+await app.RunAsync();
+
+/// <summary>Ponto de entrada, exposto para os testes de integração.</summary>
+public partial class Program;

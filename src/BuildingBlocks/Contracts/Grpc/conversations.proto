@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+option csharp_namespace = "BuildingBlocks.Contracts.Grpc";
+
+package conversations;
+
+// =============================================================================
+// CONTRATO DE AUTORIZAÇÃO DE CONVERSAS
+//
+// Consumido pelo Chat Service antes de permitir que uma conexão SignalR entre
+// numa sala de tempo real ou envie mensagem.
+//
+// POR QUE SÍNCRONO (gRPC) E NÃO ASSÍNCRONO (evento)
+// -------------------------------------------------
+// O restante da comunicação entre serviços aqui é assíncrona, por eventos. Esta
+// chamada é a exceção deliberada, e o critério é: propagamos FATOS por evento
+// ("uma mensagem foi enviada"), mas consultamos DECISÕES de autorização de forma
+// síncrona.
+//
+// A razão é que autorização precisa do dado ATUAL. Se o Chat Service mantivesse
+// uma cópia local da lista de participantes, atualizada por evento, existiria
+// uma janela — mesmo que de milissegundos — em que um usuário recém-removido de
+// uma conversa ainda conseguiria ler mensagens em tempo real. Em autorização,
+// consistência eventual é falha de segurança.
+//
+// O custo assumido: o Chat Service passa a depender do Message Service estar no
+// ar para admitir entrada em conversas. Esse acoplamento é mitigado por um cache
+// de curta duração no cliente (ver ConversationAccessPolicy).
+// =============================================================================
+
+service ConversationAccessGrpc {
+  // Retorna se o usuário participa da conversa informada.
+  rpc CheckMembership (CheckMembershipRequest) returns (CheckMembershipResponse);
+}
+
+message CheckMembershipRequest {
+  // Identificador da conversa, no formato GUID textual.
+  string conversationId = 1;
+
+  // Identificador do usuário, no formato GUID textual.
+  string userId = 2;
+}
+
+message CheckMembershipResponse {
+  // true quando o usuário é participante da conversa.
+  bool isParticipant = 1;
+}

@@ -1,83 +1,88 @@
-using System.Text;
+using BuildingBlocks.Application;
+using BuildingBlocks.AspNetCore;
 using ChatService.API.Hubs;
-using ChatService.API.Middleware;
 using ChatService.API.Services;
-using ChatService.Application;
+using ChatService.Application.Abstractions;
+using ChatService.Application.Messages;
 using ChatService.Infrastructure;
-using FluentValidation;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
+using ChatService.Infrastructure.Telemetry;
 using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
+
+// =============================================================================
+// CHAT SERVICE — camada de tempo real.
+//
+// É o único serviço SEM BANCO DE DADOS, e isso é intencional. Ele mantém
+// conexões WebSocket, roteia mensagens entre elas e publica eventos; a
+// durabilidade é responsabilidade do Message Service.
+//
+// A consequência prática é que ele pode ser reiniciado ou escalado livremente:
+// não há estado a migrar, os clientes reconectam sozinhos e nenhuma mensagem se
+// perde — ela já foi publicada no RabbitMQ antes de ser transmitida.
+// =============================================================================
 
 var builder = WebApplication.CreateBuilder(args);
-var jwtKey = builder.Configuration["Jwt:Key"] ?? "super-secret-development-key-change-me";
+
+builder.Services.AddApplicationBuildingBlocks(typeof(SendMessageCommand).Assembly);
+builder.Services.AddChatInfrastructure(builder.Configuration);
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
-builder.Services.AddSignalR()
+
+// -----------------------------------------------------------------------------
+// SignalR com backplane Redis.
+//
+// SEM O BACKPLANE, ESCALAR PARA MAIS DE UMA RÉPLICA QUEBRA O CHAT. Cada
+// instância só conhece as próprias conexões, então uma mensagem transmitida pela
+// réplica 1 jamais chegaria a um usuário conectado à réplica 2 — e o sintoma
+// seria intermitente, dependendo de em qual pod cada usuário caiu.
+//
+// Com o backplane, a transmissão vai para um canal Redis e todas as réplicas a
+// repassam às suas conexões locais.
+// -----------------------------------------------------------------------------
+builder.Services
+    .AddSignalR(options =>
+    {
+        // Em desenvolvimento, envia o detalhe da exceção ao cliente. Jamais em
+        // produção: exporia stack traces internos ao navegador.
+        options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+
+        // Keep-alive e timeout ajustados para detectar conexão morta mais rápido
+        // que o padrão, liberando os recursos do servidor sem esperar minutos.
+        options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+        options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+    })
     .AddStackExchangeRedis(builder.Configuration.GetConnectionString("Redis") ?? "redis:6379");
-builder.Services.AddMediatR(configuration => configuration.RegisterServicesFromAssembly(typeof(SendMessageCommand).Assembly));
-builder.Services.AddValidatorsFromAssembly(typeof(SendMessageCommand).Assembly);
-builder.Services.AddChatInfrastructure(builder.Configuration);
+
 builder.Services.AddScoped<IConversationNotifier, SignalRConversationNotifier>();
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
-    {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"] ?? "chat-identity",
-            ValidAudience = builder.Configuration["Jwt:Audience"] ?? "chat-clients",
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
-        };
+// `enableSignalRQueryStringToken: true` porque a API de WebSocket do navegador
+// não permite enviar o cabeçalho Authorization no handshake. O encaminhamento é
+// restrito ao caminho do hub.
+builder.AddChatJwtAuthentication(enableSignalRQueryStringToken: true);
 
-        options.Events = new JwtBearerEvents
-        {
-            OnMessageReceived = context =>
-            {
-                var accessToken = context.Request.Query["access_token"];
-                var path = context.HttpContext.Request.Path;
-                if (!string.IsNullOrWhiteSpace(accessToken) && path.StartsWithSegments("/hubs/chat"))
-                {
-                    context.Token = accessToken;
-                }
-
-                return Task.CompletedTask;
-            }
-        };
-    });
-
-builder.Services.AddAuthorization();
+builder.AddChatObservability(serviceName: "chat-service", ChatTelemetry.MeterName);
+builder.AddChatForwardedHeaders();
 builder.Services.AddHealthChecks();
-builder.Services.AddOpenTelemetry()
-    .ConfigureResource(resource => resource.AddService("chat-service"))
-    .WithTracing(tracing => tracing
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddSource("MassTransit")
-        .AddOtlpExporter())
-    .WithMetrics(metrics => metrics
-        .AddAspNetCoreInstrumentation()
-        .AddRuntimeInstrumentation()
-        .AddMeter("ChatService")
-        .AddPrometheusExporter()
-        .AddOtlpExporter());
 
 var app = builder.Build();
 
-app.UseMiddleware<ChatExceptionMiddleware>();
+app.UseChatExceptionHandling();
+app.UseChatForwardedHeaders();
 app.UseAuthentication();
 app.UseAuthorization();
+
 app.MapControllers();
 app.MapHub<ChatHub>("/hubs/chat");
 app.MapHealthChecks("/health");
 app.MapPrometheusScrapingEndpoint();
-app.MapOpenApi();
-app.Run();
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
+
+await app.RunAsync();
+
+/// <summary>Ponto de entrada, exposto para os testes de integração.</summary>
+public partial class Program;

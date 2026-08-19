@@ -1,13 +1,30 @@
+# Build .NET
 bin/
 obj/
+[Dd]ebug/
+[Rr]elease/
+TestResults/
+*.user
+*.suo
 .vs/
 .idea/
+
+# Frontend
 node_modules/
 frontend/dist/
 frontend/.angular/
+frontend/out-tsc/
+tests/e2e/node_modules/
+
+# Locais e temporários
 .local/
-*.user
-*.suo
-*.db
 *.log
+*.db
+
+# Configuração local com segredos — NUNCA versionar.
+# Os appsettings.Development.json versionados contêm apenas endereços de
+# localhost; segredos de verdade vão para User Secrets ou variáveis de ambiente.
 appsettings.Development.local.json
+appsettings.Local.json
+.env
+.env.local

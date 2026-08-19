@@ -10,6 +10,7 @@ import { ChatService } from '../services/chat.service';
 import { PresenceService } from '../services/presence.service';
 import { UserDirectoryService } from '../services/user-directory.service';
 import { ChatRealtimeMessage, ConversationReadDto, OnlineUser, UserDto } from '../models/chat.models';
+import { environment } from '../../environments/environment';
 
 interface ChatViewState {
   activeConversationId: string | null;
@@ -347,6 +348,7 @@ interface ChatViewState {
 })
 export class ChatComponent {
   private readonly viewStateStorageKeyPrefix = 'chat.view-state';
+
   private readonly authService = inject(AuthService);
   private readonly chatQueryService = inject(ChatQueryService);
   private readonly chatService = inject(ChatService);
@@ -361,22 +363,26 @@ export class ChatComponent {
   conversations: ConversationReadDto[] = [];
   messages: ChatRealtimeMessage[] = [];
   contacts: OnlineUser[] = [];
-  private readonly usersById = new Map<string, UserDto>();
   activeConversationId = '';
   activeContactId = '';
   startingConversationUserId = '';
-  userId = this.authService.user$.value?.id ?? '';
-  userName = this.authService.user$.value?.name ?? '';
+  userId = '';
+  userName = '';
+
+  private readonly usersById = new Map<string, UserDto>();
 
   readonly form = this.formBuilder.group({
-    message: ['', [Validators.required]]
+    message: ['', [Validators.required, Validators.maxLength(4000)]]
   });
 
   constructor() {
     const token = this.authService.getAccessToken();
-    const user = this.authService.user$.value;
+    const user = this.authService.currentUser();
 
+    // A guarda de rota já garante que há sessão; esta verificação é a segunda
+    // barreira, para o caso de o componente ser instanciado por outro caminho.
     if (!token || !user) {
+      void this.router.navigate(['/signin']);
       return;
     }
 
@@ -385,67 +391,92 @@ export class ChatComponent {
 
     void this.initializeAsync(token);
 
-    this.chatService.messages$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((messages) => {
-        this.messages = messages.filter((message) => !this.activeConversationId || message.conversationId === this.activeConversationId);
-        this.scrollMessagesToBottom();
-      });
+    // A lista de mensagens é um signal no serviço; o `effect` reage a cada
+    // alteração e mantém a visão filtrada pela conversa aberta.
+    effect(() => {
+      const allMessages = this.chatService.messages$();
 
-    timer(0, 10000)
+      this.messages = allMessages.filter(
+        (message) => !this.activeConversationId || message.conversationId === this.activeConversationId
+      );
+
+      this.scrollMessagesToBottom();
+    });
+
+    // Heartbeat de presença + atualização do diretório.
+    //
+    // O intervalo precisa ser confortavelmente menor que o TTL de 60 s da chave
+    // no Redis: se o cliente parar de bater, o usuário expira sozinho para
+    // offline, sem depender de um encerramento bem-comportado. O valor vem da
+    // configuração de ambiente (10 s em dev, 15 s em produção).
+    timer(0, environment.presenceHeartbeatMs)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => {
+        void this.sendHeartbeat();
         void this.reloadDirectory();
       });
 
     this.destroyRef.onDestroy(() => {
-      if (this.userId) {
-        this.presenceService.setOffline(this.userId).subscribe({ error: () => undefined });
-      }
-    });
-
-    effect(() => {
-      const currentUser = this.authService.user$.value;
-      if (!currentUser) {
-        void this.router.navigate(['/signin']);
-      }
+      // Melhor esforço para avisar que o usuário saiu. Se falhar (aba fechada
+      // antes de a requisição partir), o TTL do Redis resolve em até 60 s.
+      this.presenceService.setSelfOffline().subscribe({ error: () => undefined });
     });
   }
 
   private async initializeAsync(token: string): Promise<void> {
     this.chatService.replaceMessages([]);
+
     await this.chatService.connect(token);
-    await firstValueFrom(this.presenceService.setOnline(this.userId));
+    await firstValueFrom(this.presenceService.setSelfOnline());
     await this.reloadConversations();
     await this.reloadDirectory();
 
     const persistedViewState = this.loadViewState();
+
     if (!persistedViewState?.activeConversationId) {
       this.clearActiveSelection(false);
       return;
     }
 
-    const activeConversation = this.conversations.find((conversation) => conversation.id === persistedViewState.activeConversationId);
+    const activeConversation = this.conversations.find(
+      (conversation) => conversation.id === persistedViewState.activeConversationId
+    );
+
+    // A conversa persistida pode não existir mais (o usuário saiu dela em outro
+    // dispositivo). Restaurar às cegas produziria um 403 ao carregar o histórico.
     if (!activeConversation) {
       this.clearActiveSelection();
       return;
     }
 
-    this.activeContactId = persistedViewState.activeContactId
-      ?? activeConversation.counterpartUserId
-      ?? '';
+    this.activeContactId = persistedViewState.activeContactId ?? activeConversation.counterpartUserId ?? '';
     await this.selectConversation(activeConversation.id);
   }
 
+  private async sendHeartbeat(): Promise<void> {
+    try {
+      await firstValueFrom(this.presenceService.setSelfOnline());
+    } catch {
+      // Uma batida perdida não é motivo para interromper o uso: o TTL tem folga
+      // de seis batidas antes de considerar o usuário ausente.
+    }
+  }
+
   private async reloadConversations(): Promise<void> {
-    this.conversations = await firstValueFrom(this.chatQueryService.getUserConversations(this.userId));
+    this.conversations = await firstValueFrom(this.chatQueryService.getMyConversations());
   }
 
   private async reloadDirectory(): Promise<void> {
-    const directory = await firstValueFrom(this.userDirectoryService.getDirectory(this.userId));
-    this.contacts = directory.contacts;
-    this.usersById.clear();
-    directory.users.forEach((user) => this.usersById.set(user.id, user));
+    try {
+      const directory = await firstValueFrom(this.userDirectoryService.getDirectory(this.userId));
+
+      this.contacts = directory.contacts;
+      this.usersById.clear();
+      directory.users.forEach((user) => this.usersById.set(user.id, user));
+    } catch {
+      // Falha ao atualizar o diretório mantém a lista anterior na tela, em vez
+      // de esvaziá-la. Uma oscilação de rede não deve fazer os contatos sumirem.
+    }
   }
 
   async selectConversation(conversationId: string): Promise<void> {
@@ -458,9 +489,13 @@ export class ChatComponent {
     }
 
     this.activeConversationId = conversationId;
-  this.persistViewState();
+    this.persistViewState();
     this.chatService.replaceMessages([]);
+
+    // A entrada na sala pode ser recusada com 403 se o usuário não participar da
+    // conversa — verificação que não existia na versão anterior.
     await this.chatService.joinConversation(conversationId);
+
     const history = await firstValueFrom(this.chatQueryService.getMessages(conversationId));
     this.chatService.replaceMessages(history);
   }
@@ -477,10 +512,10 @@ export class ChatComponent {
 
       const conversation = await firstValueFrom(this.chatQueryService.createDirectConversation(user.id));
       await this.reloadConversations();
-
       await this.selectConversation(conversation.id);
-    }
-    finally {
+    } finally {
+      // `finally` garante que o botão volta a ficar habilitado mesmo se a
+      // criação falhar — sem isso, um erro deixaria o contato travado para sempre.
       this.startingConversationUserId = '';
     }
   }
@@ -491,18 +526,13 @@ export class ChatComponent {
     }
 
     const message = this.form.getRawValue().message ?? '';
+
     await this.chatService.sendMessage(this.activeConversationId, message);
     this.form.reset();
   }
 
   logout(): void {
-    if (!this.userId) {
-      this.authService.logout();
-      void this.router.navigate(['/signin']);
-      return;
-    }
-
-    this.presenceService.setOffline(this.userId).subscribe({
+    this.presenceService.setSelfOffline().subscribe({
       next: () => this.finishLogout(),
       error: () => this.finishLogout()
     });
@@ -514,7 +544,7 @@ export class ChatComponent {
 
   getConversationTitle(conversation: ConversationReadDto): string {
     if (conversation.isGroup) {
-      return 'Group conversation';
+      return 'Conversa em grupo';
     }
 
     if (!conversation.counterpartUserId) {
@@ -526,11 +556,14 @@ export class ChatComponent {
 
   getActiveConversationTitle(): string {
     if (this.activeContactId) {
-      return this.usersById.get(this.activeContactId)?.name ?? 'Select a conversation';
+      return this.usersById.get(this.activeContactId)?.name ?? 'Selecione uma conversa';
     }
 
-    const activeConversation = this.conversations.find((conversation) => conversation.id === this.activeConversationId);
-    return activeConversation ? this.getConversationTitle(activeConversation) : 'Select a conversation';
+    const activeConversation = this.conversations.find(
+      (conversation) => conversation.id === this.activeConversationId
+    );
+
+    return activeConversation ? this.getConversationTitle(activeConversation) : 'Selecione uma conversa';
   }
 
   private finishLogout(): void {
@@ -559,7 +592,19 @@ export class ChatComponent {
     }
 
     const rawState = localStorage.getItem(this.getViewStateStorageKey());
-    return rawState ? JSON.parse(rawState) as ChatViewState : null;
+
+    if (!rawState) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(rawState) as ChatViewState;
+    } catch {
+      // Estado corrompido: descarta em vez de derrubar o componente. O usuário
+      // apenas volta à tela sem conversa selecionada.
+      localStorage.removeItem(this.getViewStateStorageKey());
+      return null;
+    }
   }
 
   private clearViewState(): void {
@@ -580,17 +625,26 @@ export class ChatComponent {
     }
   }
 
+  /**
+   * A chave é por usuário: em um computador compartilhado, o estado de visão de
+   * uma pessoa não deve aparecer na sessão de outra.
+   */
   private getViewStateStorageKey(): string {
     return `${this.viewStateStorageKeyPrefix}.${this.userId}`;
   }
 
   private scrollMessagesToBottom(): void {
-    const scheduleScroll = typeof requestAnimationFrame === 'function'
-      ? requestAnimationFrame
-      : (callback: FrameRequestCallback) => window.setTimeout(callback, 0);
+    // requestAnimationFrame garante que o scroll aconteça DEPOIS de o Angular
+    // renderizar a mensagem nova. Ajustar antes moveria o scroll para uma altura
+    // que ainda não existe, e a última mensagem ficaria fora da tela.
+    const scheduleScroll =
+      typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame
+        : (callback: FrameRequestCallback) => window.setTimeout(callback, 0);
 
     scheduleScroll(() => {
       const container = this.messagesContainer?.nativeElement;
+
       if (!container) {
         return;
       }

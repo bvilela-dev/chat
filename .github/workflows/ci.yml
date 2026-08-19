@@ -1,0 +1,295 @@
+# =============================================================================
+# PIPELINE DE INTEGRAÇÃO CONTÍNUA
+#
+# O projeto não tinha CI. Isso é uma lacuna relevante: sem pipeline, "funciona
+# na minha máquina" é a única garantia de que o código compila e os testes
+# passam — e nada impede que um commit quebrado chegue à branch principal.
+#
+# Os jobs rodam EM PARALELO sempre que não há dependência entre eles, de modo
+# que o retorno chegue em minutos e não desestimule commits pequenos.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Permite disparar manualmente pela interface do GitHub.
+  workflow_dispatch:
+
+# Cancela execuções anteriores da mesma branch quando um novo commit chega.
+# Sem isto, um push seguido de outro deixaria dois builds concorrendo pelos
+# runners — o primeiro já obsoleto.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  NODE_VERSION: '22'
+  # Desliga a telemetria e a mensagem de boas-vindas do .NET, que só poluem o log.
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # BACKEND — build com avisos tratados como erro, e testes.
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend (.NET)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache de pacotes NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          # A chave inclui o hash dos arquivos de projeto: o cache é invalidado
+          # exatamente quando uma dependência muda, e não a cada commit.
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restaurar dependências
+        run: dotnet restore Chat.slnx
+
+      - name: Compilar
+        # A solução usa TreatWarningsAsErrors, então qualquer aviso novo quebra
+        # o build aqui — que é justamente onde deve quebrar.
+        run: dotnet build Chat.slnx --configuration Release --no-restore
+
+      - name: Executar testes
+        run: >
+          dotnet test Chat.slnx
+          --configuration Release
+          --no-build
+          --verbosity normal
+          --logger "trx;LogFileName=test-results.trx"
+          --collect:"XPlat Code Coverage"
+
+      - name: Publicar resultados dos testes
+        # `always()` garante a publicação mesmo quando os testes falham — que é
+        # exatamente quando o relatório mais importa.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-testes-backend
+          path: '**/TestResults/**'
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # AUDITORIA DE SEGURANÇA — dependências vulneráveis.
+  # ---------------------------------------------------------------------------
+  security-audit:
+    name: Auditoria de dependências
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restaurar dependências
+        run: dotnet restore Chat.slnx
+
+      - name: Verificar pacotes NuGet vulneráveis
+        # `dotnet list package` sempre sai com código 0, mesmo encontrando
+        # vulnerabilidades — então a detecção é feita procurando o marcador de
+        # severidade na saída e falhando explicitamente.
+        #
+        # Este passo é o que impede a reintrodução silenciosa de um pacote
+        # vulnerável: era o estado do projeto antes desta revisão, com CVEs de
+        # severidade alta em AutoMapper, Microsoft.OpenApi e MessagePack.
+        run: |
+          set -euo pipefail
+          dotnet list Chat.slnx package --vulnerable --include-transitive 2>&1 | tee vulnerable.txt
+          if grep -qE 'High|Critical' vulnerable.txt; then
+            echo "::error::Pacotes com vulnerabilidade de severidade alta ou crítica encontrados."
+            exit 1
+          fi
+          echo "Nenhuma vulnerabilidade de severidade alta ou crítica."
+
+      - name: Auditar dependências npm
+        working-directory: frontend
+        # `--audit-level=high` ignora avisos de baixa severidade, que em cadeias
+        # de build de frontend são numerosos e raramente exploráveis.
+        run: npm audit --audit-level=high || echo "::warning::Auditoria npm reportou pendências."
+
+  # ---------------------------------------------------------------------------
+  # FRONTEND — build de produção e testes.
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend (Angular)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Instalar dependências
+        working-directory: frontend
+        # `npm ci` e não `npm install`: instala exatamente o que está no
+        # lockfile, tornando o build reproduzível.
+        run: npm ci
+
+      - name: Verificar tipos
+        working-directory: frontend
+        run: npm run lint:types
+
+      - name: Executar testes
+        working-directory: frontend
+        run: npm run test
+
+      - name: Build de produção
+        working-directory: frontend
+        # Também valida os budgets de tamanho definidos no angular.json: um
+        # bundle que cresce demais quebra o build.
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # IMAGENS DOCKER — confirma que todas as imagens realmente constroem.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Imagens Docker
+    runs-on: ubuntu-latest
+    # Só constrói imagens depois que código e testes passaram: adianta o retorno
+    # de erro e economiza minutos de runner.
+    needs: [backend, frontend]
+
+    strategy:
+      # `fail-fast: false` deixa todas as imagens serem tentadas mesmo que uma
+      # falhe — assim um único push revela todos os problemas de uma vez.
+      fail-fast: false
+      matrix:
+        include:
+          - name: identity-service
+            path: src/IdentityService/API/IdentityService.API.csproj
+            dll: IdentityService.API.dll
+          - name: message-service
+            path: src/MessageService/API/MessageService.API.csproj
+            dll: MessageService.API.dll
+          - name: chat-service
+            path: src/ChatService/API/ChatService.API.csproj
+            dll: ChatService.API.dll
+          - name: presence-service
+            path: src/PresenceService/API/PresenceService.API.csproj
+            dll: PresenceService.API.dll
+          - name: notification-service
+            path: src/NotificationService/API/NotificationService.API.csproj
+            dll: NotificationService.API.dll
+          - name: api-gateway
+            path: src/ApiGateway/ApiGateway.csproj
+            dll: ApiGateway.dll
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir imagem ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Dockerfile
+          build-args: |
+            SERVICE_PATH=${{ matrix.path }}
+            SERVICE_DLL=${{ matrix.dll }}
+          # Não publica: o objetivo aqui é validar que a imagem constrói. A
+          # publicação pertence ao pipeline de entrega, não ao de integração.
+          push: false
+          # Cache compartilhado entre execuções, via GitHub Actions Cache.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # ---------------------------------------------------------------------------
+  # VERIFICAÇÃO PONTA A PONTA — sobe a stack completa e exercita o sistema real.
+  #
+  # É a camada que pega o que os testes unitários não alcançam: negociação de
+  # protocolo, mapeamento do ORM, roteamento do gateway, handshake do WebSocket e
+  # a consistência eventual entre escrita e projeção.
+  #
+  # Dois defeitos deste projeto só apareceram aqui — ver tests/e2e/README.md.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: Verificação ponta a ponta
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Subir a stack
+        run: docker compose -f deploy/docker/docker-compose.yml up --build -d
+
+      - name: Aguardar os serviços ficarem saudáveis
+        # O compose já encadeia `condition: service_healthy`, então o `up`
+        # retorna com tudo pronto. Esta espera extra cobre o frontend, cuja
+        # prontidão não é dependência de ninguém.
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8080/health > /dev/null; then
+              echo "Gateway pronto."
+              exit 0
+            fi
+            echo "Aguardando o gateway… ($attempt/30)"
+            sleep 5
+          done
+          echo "::error::Gateway não ficou pronto a tempo."
+          exit 1
+
+      - name: Executar a verificação
+        working-directory: tests/e2e
+        run: npm install && npm test
+
+      - name: Coletar logs em caso de falha
+        if: failure()
+        run: docker compose -f deploy/docker/docker-compose.yml logs --tail=200
+
+      - name: Derrubar a stack
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.yml down -v
+
+  frontend-image:
+    name: Imagem Docker (frontend)
+    runs-on: ubuntu-latest
+    needs: [frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir imagem do frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: false
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend

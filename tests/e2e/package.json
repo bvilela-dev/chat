@@ -1,0 +1,13 @@
+{
+  "name": "chat-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Verificação ponta a ponta contra a stack em execução.",
+  "scripts": {
+    "test": "node security-and-flow.mjs"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "9.0.6"
+  }
+}

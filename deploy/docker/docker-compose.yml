@@ -1,19 +1,103 @@
+# =============================================================================
+# STACK LOCAL COMPLETA
+#
+# Sobe infraestrutura (PostgreSQL ×2, Redis, RabbitMQ), observabilidade
+# (OpenTelemetry Collector, Prometheus, Grafana) e os seis serviços da aplicação.
+#
+# Uso:
+#   docker compose -f deploy/docker/docker-compose.yml up --build
+#
+# -----------------------------------------------------------------------------
+# A CORREÇÃO MAIS IMPORTANTE DESTE ARQUIVO: `condition: service_healthy`
+# -----------------------------------------------------------------------------
+# A versão anterior usava `depends_on` na forma simples, que garante apenas a
+# ORDEM DE INÍCIO dos contêineres — não que o serviço dependido esteja PRONTO.
+#
+# Na prática, o PostgreSQL leva alguns segundos para aceitar conexões depois que
+# o contêiner sobe. Como Identity e Message aplicam migrations no startup, eles
+# tentavam conectar num banco que ainda não escutava, lançavam exceção e
+# morriam. O sintoma era o clássico "funciona no segundo `up`, falha no
+# primeiro" — porque na segunda vez o banco já estava de pé.
+#
+# Com health checks e `condition: service_healthy`, o Compose só inicia a
+# aplicação depois que a dependência responde de verdade.
+# =============================================================================
+
+# Rede explícita: dá controle sobre isolamento e deixa a topologia legível,
+# em vez de depender da rede default criada implicitamente.
+networks:
+  chat-network:
+    driver: bridge
+
+volumes:
+  postgres_identity_data:
+  postgres_message_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:
+
+# -----------------------------------------------------------------------------
+# Âncoras YAML: blocos reutilizáveis, para não repetir a mesma configuração em
+# seis serviços. Alterar o endereço do broker vira uma linha só.
+# -----------------------------------------------------------------------------
+x-common-environment: &common-environment
+  ASPNETCORE_ENVIRONMENT: Development
+  RabbitMq__Host: rabbitmq
+  RabbitMq__Username: guest
+  RabbitMq__Password: guest
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  # ATENÇÃO: chave de desenvolvimento. Em produção, os serviços FALHAM AO INICIAR
+  # se esta chave for usada — ver JwtAuthenticationExtensions.
+  Jwt__Issuer: chat-identity
+  Jwt__Audience: chat-clients
+  Jwt__Key: super-secret-development-key-change-me
+
+# Health check dos serviços .NET.
+#
+# Consulta o endpoint /health, que por sua vez verifica as dependências reais do
+# serviço (por exemplo, a conexão com o PostgreSQL). Um serviço que responde HTTP
+# mas não alcança o banco NÃO está pronto, e não deve receber tráfego.
+#
+# `start_period` cobre a aplicação de migrations no startup sem que as primeiras
+# tentativas contem como falha.
+x-service-healthcheck: &service-healthcheck
+  test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health || exit 1"]
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 40s
+
 services:
+  # ===========================================================================
+  # INFRAESTRUTURA
+  # ===========================================================================
+
   postgres-identity:
     image: postgres:17-alpine
     container_name: postgres-identity
+    networks: [chat-network]
     environment:
       POSTGRES_DB: chat_identity
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
+      # Porta 5433 no host: evita conflito com um PostgreSQL local na 5432.
       - "5433:5432"
     volumes:
       - postgres_identity_data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` é a forma canônica de perguntar "o PostgreSQL já aceita
+      # conexões?". Verificar apenas se o processo existe não basta: ele sobe
+      # antes de terminar a recuperação e a inicialização do cluster.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chat_identity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   postgres-message:
     image: postgres:17-alpine
     container_name: postgres-message
+    networks: [chat-network]
     environment:
       POSTGRES_DB: chat_message
       POSTGRES_USER: postgres
@@ -22,182 +106,294 @@ services:
       - "5434:5432"
     volumes:
       - postgres_message_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chat_message"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7.4-alpine
     container_name: redis
+    networks: [chat-network]
     ports:
       - "6379:6379"
+    # `--appendonly yes` habilita persistência: reiniciar o Redis não zera a
+    # presença nem o registro de conexões. Não é crítico (esses dados são
+    # efêmeros por natureza), mas evita que todo mundo apareça offline após um
+    # restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   rabbitmq:
     image: rabbitmq:4-management
     container_name: rabbitmq
+    networks: [chat-network]
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Interface de gerenciamento (guest/guest)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      # `check_running` confirma que o nó do RabbitMQ está operacional, e não
+      # apenas que o processo Erlang subiu. O broker leva ~15 s até aceitar
+      # conexões AMQP.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # ===========================================================================
+  # OBSERVABILIDADE
+  # ===========================================================================
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.123.0
     container_name: otel-collector
+    networks: [chat-network]
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ../observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     ports:
-      - "4317:4317"
+      - "4317:4317"  # OTLP gRPC
 
   prometheus:
     image: prom/prometheus:v3.2.1
     container_name: prometheus
+    networks: [chat-network]
     volumes:
       - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
     ports:
       - "9090:9090"
 
   grafana:
     image: grafana/grafana:11.5.2
     container_name: grafana
+    networks: [chat-network]
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      # Sem login para visualizar: reduz o atrito ao demonstrar os painéis.
+      # Jamais em produção.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:
       - ../observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ../observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
     ports:
       - "3000:3000"
+    depends_on:
+      - prometheus
+
+  # ===========================================================================
+  # SERVIÇOS DA APLICAÇÃO
+  # ===========================================================================
 
   identity-service:
     build:
       context: ../../
-      dockerfile: src/IdentityService/API/Dockerfile
+      dockerfile: src/Dockerfile
+      args:
+        SERVICE_PATH: src/IdentityService/API/IdentityService.API.csproj
+        SERVICE_DLL: IdentityService.API.dll
+    container_name: identity-service
+    networks: [chat-network]
     environment:
+      <<: *common-environment
       ConnectionStrings__IdentityDatabase: Host=postgres-identity;Port=5432;Database=chat_identity;Username=postgres;Password=postgres
-      RabbitMq__Host: rabbitmq
-      RabbitMq__Username: guest
-      RabbitMq__Password: guest
-      Jwt__Issuer: chat-identity
-      Jwt__Audience: chat-clients
-      Jwt__Key: super-secret-development-key-change-me
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Portas explícitas.
+      #
+      # Os contêineres rodam com ASPNETCORE_ENVIRONMENT=Development, então o
+      # appsettings.Development.json é aplicado — e ele define portas próprias
+      # (5001/5011) para permitir rodar os serviços lado a lado FORA de
+      # contêineres, sem colisão.
+      #
+      # Dentro do contêiner cada serviço tem seu próprio espaço de portas, e a
+      # imagem expõe 8080/8081. Declarar aqui sobrepõe o perfil de
+      # desenvolvimento e mantém o health check e o gateway apontando para as
+      # portas certas.
+      Ports__Rest: 8080
+      Ports__Grpc: 8081
     depends_on:
-      - postgres-identity
-      - rabbitmq
-      - otel-collector
+      # Espera o banco estar PRONTO, não apenas iniciado. Sem isto, as migrations
+      # do startup falham e o contêiner morre no primeiro `up`.
+      postgres-identity:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8081:8080"
-
-  chat-service:
-    build:
-      context: ../../
-      dockerfile: src/ChatService/API/Dockerfile
-    environment:
-      ConnectionStrings__Redis: redis:6379
-      RabbitMq__Host: rabbitmq
-      RabbitMq__Username: guest
-      RabbitMq__Password: guest
-      Jwt__Issuer: chat-identity
-      Jwt__Audience: chat-clients
-      Jwt__Key: super-secret-development-key-change-me
-      Grpc__Identity: http://identity-service:8080
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-    depends_on:
-      - identity-service
-      - redis
-      - rabbitmq
-      - otel-collector
-    ports:
-      - "8082:8080"
+      - "8091:8081"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
 
   message-service:
     build:
       context: ../../
-      dockerfile: src/MessageService/API/Dockerfile
+      dockerfile: src/Dockerfile
+      args:
+        SERVICE_PATH: src/MessageService/API/MessageService.API.csproj
+        SERVICE_DLL: MessageService.API.dll
+    container_name: message-service
+    networks: [chat-network]
     environment:
+      <<: *common-environment
       ConnectionStrings__MessageDatabase: Host=postgres-message;Port=5432;Database=chat_message;Username=postgres;Password=postgres
-      RabbitMq__Host: rabbitmq
-      RabbitMq__Username: guest
-      RabbitMq__Password: guest
-      Jwt__Issuer: chat-identity
-      Jwt__Audience: chat-clients
-      Jwt__Key: super-secret-development-key-change-me
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Portas explícitas.
+      #
+      # Os contêineres rodam com ASPNETCORE_ENVIRONMENT=Development, então o
+      # appsettings.Development.json é aplicado — e ele define portas próprias
+      # (5001/5011) para permitir rodar os serviços lado a lado FORA de
+      # contêineres, sem colisão.
+      #
+      # Dentro do contêiner cada serviço tem seu próprio espaço de portas, e a
+      # imagem expõe 8080/8081. Declarar aqui sobrepõe o perfil de
+      # desenvolvimento e mantém o health check e o gateway apontando para as
+      # portas certas.
+      Ports__Rest: 8080
+      Ports__Grpc: 8081
     depends_on:
-      - postgres-message
-      - rabbitmq
-      - otel-collector
+      postgres-message:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8083:8080"
+      # Porta gRPC publicada apenas para diagnóstico local. Em produção ela não
+      # deve sair da rede interna.
+      - "8093:8081"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
+
+  chat-service:
+    build:
+      context: ../../
+      dockerfile: src/Dockerfile
+      args:
+        SERVICE_PATH: src/ChatService/API/ChatService.API.csproj
+        SERVICE_DLL: ChatService.API.dll
+    container_name: chat-service
+    networks: [chat-network]
+    environment:
+      <<: *common-environment
+      ConnectionStrings__Redis: redis:6379
+      # Endereço do serviço gRPC que responde às consultas de participação em
+      # conversa. É a dependência que sustenta a autorização em tempo real.
+      # Porta 8081: gRPC em HTTP/2. O Kestrel não consegue servir HTTP/1.1 e
+      # HTTP/2 na mesma porta sem TLS — ver GrpcHostingExtensions.
+      Grpc__MessageService: http://message-service:8081
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      # Aguarda o Message Service porque a política de acesso depende do gRPC
+      # dele. A política falha FECHADA se ele estiver indisponível — o chat
+      # subiria, mas ninguém conseguiria entrar em conversa alguma.
+      message-service:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
 
   presence-service:
     build:
       context: ../../
-      dockerfile: src/PresenceService/API/Dockerfile
+      dockerfile: src/Dockerfile
+      args:
+        SERVICE_PATH: src/PresenceService/API/PresenceService.API.csproj
+        SERVICE_DLL: PresenceService.API.dll
+    container_name: presence-service
+    networks: [chat-network]
     environment:
+      <<: *common-environment
       ConnectionStrings__Redis: redis:6379
-      RabbitMq__Host: rabbitmq
-      RabbitMq__Username: guest
-      RabbitMq__Password: guest
-      Jwt__Issuer: chat-identity
-      Jwt__Audience: chat-clients
-      Jwt__Key: super-secret-development-key-change-me
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
-      - redis
-      - rabbitmq
-      - otel-collector
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8084:8080"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
 
   notification-service:
     build:
       context: ../../
-      dockerfile: src/NotificationService/API/Dockerfile
+      dockerfile: src/Dockerfile
+      args:
+        SERVICE_PATH: src/NotificationService/API/NotificationService.API.csproj
+        SERVICE_DLL: NotificationService.API.dll
+    container_name: notification-service
+    networks: [chat-network]
     environment:
+      <<: *common-environment
       ConnectionStrings__Redis: redis:6379
-      RabbitMq__Host: rabbitmq
-      RabbitMq__Username: guest
-      RabbitMq__Password: guest
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
-      - redis
-      - rabbitmq
-      - otel-collector
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8085:8080"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
 
   api-gateway:
     build:
       context: ../../
-      dockerfile: src/ApiGateway/Dockerfile
+      dockerfile: src/Dockerfile
+      args:
+        SERVICE_PATH: src/ApiGateway/ApiGateway.csproj
+        SERVICE_DLL: ApiGateway.dll
+    container_name: api-gateway
+    networks: [chat-network]
     environment:
-      Jwt__Issuer: chat-identity
-      Jwt__Audience: chat-clients
-      Jwt__Key: super-secret-development-key-change-me
+      <<: *common-environment
+      # Origens permitidas pelo CORS. Em Development a ausência desta variável
+      # liberaria qualquer origem (sem credenciais); declará-la aqui mantém o
+      # ambiente local próximo do comportamento de produção.
+      Cors__AllowedOrigins: http://localhost:4200,http://localhost:80
       ReverseProxy__Clusters__identity-cluster__Destinations__identity__Address: http://identity-service:8080/
       ReverseProxy__Clusters__message-cluster__Destinations__message__Address: http://message-service:8080/
       ReverseProxy__Clusters__presence-cluster__Destinations__presence__Address: http://presence-service:8080/
       ReverseProxy__Clusters__notification-cluster__Destinations__notification__Address: http://notification-service:8080/
       ReverseProxy__Clusters__chat-cluster__Destinations__chat__Address: http://chat-service:8080/
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
-      - identity-service
-      - chat-service
-      - message-service
-      - presence-service
-      - notification-service
-      - otel-collector
+      identity-service:
+        condition: service_healthy
+      message-service:
+        condition: service_healthy
+      chat-service:
+        condition: service_healthy
+      presence-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
     ports:
       - "8080:8080"
+    healthcheck: *service-healthcheck
+    restart: unless-stopped
 
   frontend:
     build:
       context: ../../
       dockerfile: frontend/Dockerfile
+    container_name: frontend
+    networks: [chat-network]
     depends_on:
-      - api-gateway
+      api-gateway:
+        condition: service_healthy
     ports:
       - "4200:80"
-
-volumes:
-  postgres_identity_data:
-  postgres_message_data:
+    restart: unless-stopped

@@ -3,8 +3,17 @@
     <Project Path="src/ApiGateway/ApiGateway.csproj" />
   </Folder>
   <Folder Name="/src/BuildingBlocks/" />
+  <Folder Name="/src/BuildingBlocks/Application/">
+    <Project Path="src/BuildingBlocks/Application/BuildingBlocks.Application.csproj" />
+  </Folder>
+  <Folder Name="/src/BuildingBlocks/AspNetCore/">
+    <Project Path="src/BuildingBlocks/AspNetCore/BuildingBlocks.AspNetCore.csproj" />
+  </Folder>
   <Folder Name="/src/BuildingBlocks/Contracts/">
     <Project Path="src/BuildingBlocks/Contracts/BuildingBlocks.Contracts.csproj" />
+  </Folder>
+  <Folder Name="/src/BuildingBlocks/Messaging/">
+    <Project Path="src/BuildingBlocks/Messaging/BuildingBlocks.Messaging.csproj" />
   </Folder>
   <Folder Name="/src/ChatService/" />
   <Folder Name="/src/ChatService/API/">
@@ -67,5 +76,12 @@
   </Folder>
   <Folder Name="/src/PresenceService/Infrastructure/">
     <Project Path="src/PresenceService/Infrastructure/PresenceService.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BuildingBlocks.UnitTests/BuildingBlocks.UnitTests.csproj" />
+    <Project Path="tests/ChatService.UnitTests/ChatService.UnitTests.csproj" />
+    <Project Path="tests/IdentityService.UnitTests/IdentityService.UnitTests.csproj" />
+    <Project Path="tests/MessageService.UnitTests/MessageService.UnitTests.csproj" />
+    <Project Path="tests/PresenceService.UnitTests/PresenceService.UnitTests.csproj" />
   </Folder>
 </Solution>

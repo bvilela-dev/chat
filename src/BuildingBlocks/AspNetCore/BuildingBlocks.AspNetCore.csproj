@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Bloco de construção da BORDA HTTP, compartilhado por todos os serviços que
+    expõem uma API. Concentra autenticação, CORS, tratamento de erros,
+    observabilidade e limitação de taxa.
+
+    Antes desta consolidação, cada Program.cs repetia ~40 linhas idênticas de
+    configuração de JWT e OpenTelemetry. Além do ruído, isso é um risco real:
+    quando existem cinco cópias de uma regra de segurança, corrigir quatro delas
+    parece "pronto" — e a quinta continua vulnerável.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!--
+      Sdk padrão (não .Web) + FrameworkReference: é assim que se cria uma
+      biblioteca de classes que usa tipos do ASP.NET Core sem ser, ela própria,
+      uma aplicação executável.
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Application\BuildingBlocks.Application.csproj" />
+  </ItemGroup>
+
+</Project>
